@@ -19,15 +19,15 @@ const float SAMPLE_DELAY_US = 100.f;
 // ─── Median filter ────────────────────────────────────────────────────────────
 #define MEDIAN_FILTER_SIZE 9
 static int median_window[MEDIAN_FILTER_SIZE] = {0};
-extern int filter_mode; // 0=none, 1=mean (default), 2=median
+static int filter_mode = 1; // 0=none, 1=mean (default), 2=median
 
-static void median_push(int adc_val)
+void median_push(int adc_val)
 {
     memmove(median_window, median_window + 1, sizeof(int) * (MEDIAN_FILTER_SIZE - 1));
     median_window[MEDIAN_FILTER_SIZE - 1] = adc_val;
 }
 
-static int median_read()
+int median_read()
 {
     int buf[MEDIAN_FILTER_SIZE];
     memcpy(buf, median_window, sizeof(median_window));

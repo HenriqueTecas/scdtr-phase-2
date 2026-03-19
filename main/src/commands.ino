@@ -30,8 +30,8 @@ extern float energy_cost;  // Table 3: energy cost coefficient
 // Arduino's Print base class has no printf(), so we snprintf into a temp
 // buffer and call the universal print(const char*) method.
 static char _pbuf[128];
-#define PRINTF(out, ...) \
-    do { snprintf(_pbuf, sizeof(_pbuf), __VA_ARGS__); (out).print(_pbuf); } while(0)
+#define PRINTF(out, fmt, ...) \
+    do { snprintf(_pbuf, sizeof(_pbuf), fmt, ##__VA_ARGS__); (out).print(_pbuf); } while(0)
 
 // =============================================================================
 void commands(char *buffer, Print &out)
@@ -41,6 +41,22 @@ void commands(char *buffer, Print &out)
     int     luminaire_index;
     float   value;
     command = buffer[0];
+
+    // ── Hub forwarding ──────────────────────────────────────────────────────
+    // Parse the luminaire index from any command that has one
+    // If it's not ours, forward the whole buffer over CAN and return
+    if (command != 'h' && command != 'R') {
+        int idx = -1;
+        // Search for the first integer in the buffer after the command
+        char *p = buffer + 1;
+        while (*p && !isdigit(*p) && *p != '-') p++;
+        if (*p && sscanf(p, "%d", &idx) == 1) {
+            if (idx > 0 && idx != LUMINAIRE) {
+                hub_forward(buffer, (uint8_t)idx);
+                return;
+            }
+        }
+    }
 
     switch (command)
     {
@@ -53,8 +69,6 @@ void commands(char *buffer, Print &out)
             if (!pid.get_feedback())
                 analogWrite(LED_PIN, (int)(serial_duty_cycle * PWM_MAX));
             out.println("ack");
-        } else {
-            hub_forward_command(buffer, (uint8_t)luminaire_index);
         }
         break;
 
@@ -65,8 +79,6 @@ void commands(char *buffer, Print &out)
             r = value;
             flicker_holdoff = FLICKER_EXCLUDE_SAMPLES;
             out.println("ack");
-        } else {
-            hub_forward_command(buffer, (uint8_t)luminaire_index);
         }
         break;
 
@@ -80,8 +92,6 @@ void commands(char *buffer, Print &out)
             r = (mode == 2) ? ref_high : (mode == 1) ? ref_low : 0.0f;
             flicker_holdoff = FLICKER_EXCLUDE_SAMPLES;
             PRINTF(out, "ack: occupancy=%d  r=%.1f LUX\n", mode, r);
-        } else {
-            hub_forward_command(buffer, (uint8_t)luminaire_index);
         }
         break;
 
@@ -91,8 +101,6 @@ void commands(char *buffer, Print &out)
         if (LUMINAIRE == luminaire_index) {
             pid.set_anti_windup((int)value);
             PRINTF(out, "ack: anti_windup=%d\n", pid.get_anti_windup());
-        } else {
-            hub_forward_command(buffer, (uint8_t)luminaire_index);
         }
         break;
 
@@ -105,8 +113,6 @@ void commands(char *buffer, Print &out)
                 apply_feedforward(r);
             pid.set_feedback((int)value);
             out.println("ack");
-        } else {
-            hub_forward_command(buffer, (uint8_t)luminaire_index);
         }
         break;
 
@@ -119,8 +125,6 @@ void commands(char *buffer, Print &out)
             else if (x_variable == 'u') { stream_u = 1; out.println("ack"); }
             else if (x_variable == 'j') { stream_j = 1; out.println("ack"); }
             else out.println("err: use y, u or j");
-        } else {
-            PRINTF(out, "err: this node is %d, not %d\n", LUMINAIRE, luminaire_index);
         }
         break;
 
@@ -152,8 +156,6 @@ void commands(char *buffer, Print &out)
         if (LUMINAIRE == luminaire_index) {
             ref_high = value;
             out.println("ack");
-        } else {
-            hub_forward_command(buffer, (uint8_t)luminaire_index);
         }
         break;
 
@@ -163,8 +165,6 @@ void commands(char *buffer, Print &out)
         if (LUMINAIRE == luminaire_index) {
             ref_low = value;
             out.println("ack");
-        } else {
-            hub_forward_command(buffer, (uint8_t)luminaire_index);
         }
         break;
 
@@ -174,8 +174,6 @@ void commands(char *buffer, Print &out)
         if (LUMINAIRE == luminaire_index) {
             energy_cost = value;
             out.println("ack");
-        } else {
-            hub_forward_command(buffer, (uint8_t)luminaire_index);
         }
         break;
 
@@ -228,22 +226,22 @@ void commands(char *buffer, Print &out)
             break;
         case 'p': { float val; int idx; std::sscanf(buffer+3,"%d %f",&idx,&val);
             if (LUMINAIRE==idx){ pid.set_kp(val); PRINTF(out,"ack: kp=%.4f\n",val); }
-            else out.println("err"); break; }
+            break; }
         case 'i': { float val; int idx; std::sscanf(buffer+3,"%d %f",&idx,&val);
             if (LUMINAIRE==idx){ pid.set_ki(val); PRINTF(out,"ack: ki=%.4f\n",val); }
-            else out.println("err"); break; }
+            break; }
         case 'B': { float val; int idx; std::sscanf(buffer+3,"%d %f",&idx,&val);
             if (LUMINAIRE==idx){ pid.set_b(val);  PRINTF(out,"ack: b=%.4f\n", val); }
-            else out.println("err"); break; }
+            break; }
         case 't': { float val; int idx; std::sscanf(buffer+3,"%d %f",&idx,&val);
             if (LUMINAIRE==idx){ pid.set_kt(val); PRINTF(out,"ack: kt=%.4f\n",val); }
-            else out.println("err"); break; }
+            break; }
         case 'w': { float val; int idx; std::sscanf(buffer+3,"%d %f",&idx,&val);
             if (LUMINAIRE==idx){ pid.set_bumpless((int)val); PRINTF(out,"ack: bumpless=%d\n",(int)val); }
-            else out.println("err"); break; }
+            break; }
         case 'f': { float val; int idx; std::sscanf(buffer+3,"%d %f",&idx,&val);
             if (LUMINAIRE==idx){ filter_mode=(int)val; PRINTF(out,"ack: filter=%d\n",(int)val); }
-            else out.println("err"); break; }
+            break; }
         default:
             out.println("err: unknown calibration sub-command");
             break;
@@ -255,78 +253,59 @@ void commands(char *buffer, Print &out)
         std::sscanf(buffer, "%c %c %d", &command, &sub_command, &luminaire_index);
         switch (sub_command)
         {
-        // ── Measurements: serve from hub cache for remote nodes ───────────────
         case 'y':
             if (LUMINAIRE == luminaire_index)
                 PRINTF(out, "y %d %.4f\n", LUMINAIRE, lux_value);
-            else if (hub_node_alive((uint8_t)luminaire_index))
-                PRINTF(out, "y %d %.4f\n", luminaire_index, hub_cached_lux((uint8_t)luminaire_index));
-            else
-                hub_forward_command(buffer, (uint8_t)luminaire_index);
             break;
 
         case 'u':
             if (LUMINAIRE == luminaire_index)
                 PRINTF(out, "u %d %.4f\n", LUMINAIRE,
                        pid.get_feedback() ? pid.get_duty_cycle() : serial_duty_cycle);
-            else if (hub_node_alive((uint8_t)luminaire_index))
-                PRINTF(out, "u %d %.4f\n", luminaire_index, hub_cached_duty((uint8_t)luminaire_index));
-            else
-                hub_forward_command(buffer, (uint8_t)luminaire_index);
             break;
 
         case 'r':
             if (LUMINAIRE == luminaire_index)
                 PRINTF(out, "r %d %.2f\n", LUMINAIRE, r);
-            else if (hub_node_alive((uint8_t)luminaire_index))
-                PRINTF(out, "r %d %.2f\n", luminaire_index, hub_cached_ref((uint8_t)luminaire_index));
-            else
-                hub_forward_command(buffer, (uint8_t)luminaire_index);
             break;
 
-        // ── Other gets: local only or forward over CAN ────────────────────────
         case 'v':
             if (LUMINAIRE == luminaire_index) {
                 float v = (analogRead(LDR_PIN) / (float)ADC_MAX) * VCC;
                 PRINTF(out, "v %d %.4f\n", LUMINAIRE, v);
-            } else hub_forward_command(buffer, (uint8_t)luminaire_index);
+            }
             break;
 
         case 'o':
             if (LUMINAIRE == luminaire_index)
                 PRINTF(out, "o %d %d\n", LUMINAIRE, pid.get_occupancy());
-            else hub_forward_command(buffer, (uint8_t)luminaire_index);
             break;
 
         case 'a':
             if (LUMINAIRE == luminaire_index)
                 PRINTF(out, "a %d %d\n", LUMINAIRE, pid.get_anti_windup());
-            else hub_forward_command(buffer, (uint8_t)luminaire_index);
             break;
 
         case 'f':
             if (LUMINAIRE == luminaire_index)
                 PRINTF(out, "f %d %d\n", LUMINAIRE, pid.get_feedback());
-            else hub_forward_command(buffer, (uint8_t)luminaire_index);
             break;
 
         case 'd':
             if (LUMINAIRE == luminaire_index) {
                 float d_ext = max(0.0f, lux_value - sys_gain * duty_cycle);
                 PRINTF(out, "d %d %.4f\n", LUMINAIRE, d_ext);
-            } else hub_forward_command(buffer, (uint8_t)luminaire_index);
+            }
             break;
 
         case 'p':
             if (LUMINAIRE == luminaire_index)
                 PRINTF(out, "p %d %.4f\n", LUMINAIRE, pid.get_u() * MAXIMUM_POWER);
-            else hub_forward_command(buffer, (uint8_t)luminaire_index);
             break;
 
         case 't':
             if (LUMINAIRE == luminaire_index)
                 PRINTF(out, "t %d %.3f\n", LUMINAIRE, micros() * 1e-6f);
-            else hub_forward_command(buffer, (uint8_t)luminaire_index);
             break;
 
         case 'b': {   // last-minute buffer – too large for CAN, hub/local only
@@ -338,7 +317,7 @@ void commands(char *buffer, Print &out)
                 buffer_read_counter = 0;
                 if (x_variable == 'y') {
                     buffer_y = 1;
-                    Serial.printf("b y %d ", LUMINAIRE);   // always Serial for bulk dump
+                    Serial.printf("b y %d ", LUMINAIRE);
                 } else if (x_variable == 'u') {
                     buffer_u = 1;
                     Serial.printf("b u %d ", LUMINAIRE);
@@ -346,7 +325,7 @@ void commands(char *buffer, Print &out)
                     out.println("err: use y or u");
                 }
             } else {
-                out.println("err: g b only on hub node");
+                out.println("err: g b only on local node");
             }
             break;
         }
@@ -354,48 +333,41 @@ void commands(char *buffer, Print &out)
         case 'E':
             if (LUMINAIRE == luminaire_index)
                 PRINTF(out, "E %d %.4f\n", LUMINAIRE, energy_consumption);
-            else hub_forward_command(buffer, (uint8_t)luminaire_index);
             break;
 
         case 'V':
             if (LUMINAIRE == luminaire_index)
                 PRINTF(out, "V %d %.6f\n", LUMINAIRE,
                        sample_count ? visibility_error / (double)sample_count : 0.0);
-            else hub_forward_command(buffer, (uint8_t)luminaire_index);
             break;
 
         case 'F':
             if (LUMINAIRE == luminaire_index)
                 PRINTF(out, "F %d %.6f\n", LUMINAIRE,
                        sample_count ? (flicker_error / (double)sample_count) / pid.h : 0.0);
-            else hub_forward_command(buffer, (uint8_t)luminaire_index);
             break;
 
-        // ── Table 3 getters ───────────────────────────────────────────────────
-        case 'O':   // HIGH-occupancy lower bound
+        case 'O':
             if (LUMINAIRE == luminaire_index)
                 PRINTF(out, "O %d %.2f\n", LUMINAIRE, ref_high);
-            else hub_forward_command(buffer, (uint8_t)luminaire_index);
             break;
 
-        case 'U':   // LOW-occupancy lower bound
+        case 'U':
             if (LUMINAIRE == luminaire_index)
                 PRINTF(out, "U %d %.2f\n", LUMINAIRE, ref_low);
-            else hub_forward_command(buffer, (uint8_t)luminaire_index);
             break;
 
-        case 'L':   // current active lower bound
+        case 'L':
             if (LUMINAIRE == luminaire_index) {
                 float lb = (pid.get_occupancy() == 2) ? ref_high :
                            (pid.get_occupancy() == 1) ? ref_low  : 0.0f;
                 PRINTF(out, "L %d %.2f\n", LUMINAIRE, lb);
-            } else hub_forward_command(buffer, (uint8_t)luminaire_index);
+            }
             break;
 
-        case 'C':   // energy cost
+        case 'C':
             if (LUMINAIRE == luminaire_index)
                 PRINTF(out, "C %d %.4f\n", LUMINAIRE, energy_cost);
-            else hub_forward_command(buffer, (uint8_t)luminaire_index);
             break;
 
         default:
