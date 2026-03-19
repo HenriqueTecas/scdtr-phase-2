@@ -1,3 +1,4 @@
+#include <Arduino.h>
 #include <cstdio>
 #include "pid.h"
 #include "circular_buffer.h"
@@ -5,6 +6,10 @@
 #include "metrics.h"
 #include "calibration.h"
 #include "hub.h"            // ← Phase 2: pulls in can_comms.h + hub routing
+
+// ─── CAN-BUS global instances (declared extern in can_comms.h) ───────────────
+MCP2515 can0{spi0, 17, 19, 16, 18, 10000000};
+uint8_t node_address = 0;
 
 // ─── Pin & hardware constants ─────────────────────────────────────────────────
 const int LED_PIN = 15;
@@ -30,6 +35,9 @@ int LUMINAIRE = 0;
 // ─── LDR calibration ──────────────────────────────────────────────────────────
 float ldr_m = -0.8f;
 float ldr_b = 6.3044f;
+
+// ─── Filter mode (declared extern in lux.h) ──────────────────────────────────
+int filter_mode = 1; // 0=none, 1=mean (default), 2=median
 
 // ─── System gain calibration ──────────────────────────────────────────────────
 float sys_gain       = 0.0f;
@@ -60,6 +68,14 @@ int buffer_y = 0, buffer_u = 0, buffer_read_size = 0, buffer_read_counter = 0;
 
 // 60 s × 100 Hz = 6000 samples
 CircularBuffer<6000> last_min_buf;
+
+// ─── CAN debugging counters ───────────────────────────────────────────────────
+volatile uint32_t can_tx_count = 0;
+volatile uint32_t can_rx_count = 0;
+volatile uint32_t can_rx_hello = 0;
+volatile uint32_t can_rx_lux = 0;
+volatile uint32_t can_rx_cmd = 0;
+volatile uint32_t can_error_count = 0;
 
 // ─── Phase 2: CAN LUX broadcast throttle ──────────────────────────────────────
 // Broadcast every 10 control cycles = 100 ms, keeping bus load low.
@@ -119,9 +135,8 @@ void handle_buffer_readout()
 void setup()
 {
     Serial.begin(115200);
-    // Do NOT wait for USB host — externally-powered Picos have no USB host and
-    // would block forever.  The serial monitor will show output from the moment
-    // it is opened; boot messages before that are simply lost.
+    // Do NOT wait for USB host — externally-powered Picos have no USB host
+    // and would block here forever.
 
     analogReadResolution(ADC_BITS);
     analogWriteFreq(PWM_FREQ_HZ);
@@ -129,12 +144,12 @@ void setup()
     pinMode(LED_PIN, OUTPUT);
     analogWrite(LED_PIN, 0);
 
-    // ── Phase 2: initialise CAN-BUS ──────────────────────────────────────────
-    // Resets MCP2515, negotiates node address (1-3) via flash ID, then broadcasts hello.
-    can_init();
-
     pid.init(LUMINAIRE);
     pid.h = SAMPLE_PERIOD_US * 1e-6f;  // 0.01 s
+
+    // ── Phase 2: initialise CAN-BUS ──────────────────────────────────────────
+    // Resets MCP2515, sets 1 Mbit/s, enters normal mode, sends hello broadcast.
+    can_init();
 
     Serial.printf("=== SCDTR Luminaire Ready (Phase 2) — THIS NODE = %d ===\n", LUMINAIRE);
 }
@@ -185,7 +200,14 @@ void loop()
         // Every CAN_BC_EVERY control cycles (= 100 ms) broadcast our state.
         // All nodes receive this; hub caches it for fast "g y/u/r" replies.
         if (++_can_bc_ctr >= CAN_BC_EVERY) {
-            can_broadcast_lux(lux_value, duty_cycle, r);
+            MCP2515::ERROR ce = can_broadcast_lux(lux_value, duty_cycle, r);
+            if (ce == MCP2515::ERROR_ALLTXBUSY) {
+                // TX buffers jammed by unACKed frames (no peers on bus).
+                // Reset MCP2515 to clear stuck buffers.
+                can0.reset();
+                can0.setBitrate(CAN_1000KBPS, MCP_16MHZ);
+                can0.setNormalMode();
+            }
             _can_bc_ctr = 0;
         }
     }

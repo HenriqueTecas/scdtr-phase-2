@@ -27,6 +27,7 @@ Usage:
 import sys
 import time
 import threading
+import re
 import matplotlib
 matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
@@ -38,7 +39,7 @@ import serial
 import serial.tools.list_ports
 
 # ── Configuration ──────────────────────────────────────────────────────────────
-LUMINAIRE  = 1
+LUMINAIRE  = None   # auto-detected from "THIS NODE = X" boot message
 BAUD_RATE  = 115200
 HISTORY_S  = 30
 MAX_POINTS = HISTORY_S * 100
@@ -76,20 +77,79 @@ t_start = time.time()
 
 # ── Serial thread ──────────────────────────────────────────────────────────────
 def serial_thread(port):
-    global ser
+    global ser, LUMINAIRE
     try:
         ser = serial.Serial(port, BAUD_RATE, timeout=1)
-        time.sleep(2)
-        ser.reset_input_buffer()
+        time.sleep(0.5)
+        # Do NOT call reset_input_buffer() — it would discard the boot messages
+        # containing "THIS NODE = X" that we need to detect the node ID.
+
+        with lock:
+            state["connected"] = True
+            state["status"] = f"Connected: {port} — waiting for node ID..."
+        print(f"[serial] Connected to {port}")
+
+        # ── Phase 1: read boot output until we see "THIS NODE = X" ──────────
+        # Scan for up to 25 s; the Pico prints the ready message after CAN discovery
+        # (up to 15 s idle exit when alone, faster when peers are present).
+        deadline = time.time() + 25
+        while time.time() < deadline:
+            try:
+                line = ser.readline().decode(errors="ignore").strip()
+            except serial.SerialException:
+                break
+            if not line:
+                continue
+            with lock:
+                log_lines.append(line)
+            print(f"[boot] {line}")
+
+            m = re.search(r'THIS NODE\s*=\s*(\d+)', line)
+            if m:
+                LUMINAIRE = int(m.group(1))
+                break
+
+        if LUMINAIRE is None:
+            # Boot message missed (e.g. Serial Monitor was open earlier).
+            # Probe each node index with a benign "get lux" query and take
+            # the first one that replies with a stream line.
+            print("[serial] Boot message missed — probing nodes 1/2/3...")
+            with lock:
+                log_lines.append("Boot msg missed — probing nodes...")
+            for probe_node in (1, 2, 3):
+                ser.write(f"g y {probe_node}\n".encode())
+                # Wait up to 1 s and collect all bytes the Pico sends back
+                text = ""
+                deadline2 = time.time() + 1.0
+                while time.time() < deadline2:
+                    if ser.in_waiting:
+                        text += ser.read(ser.in_waiting).decode(errors="ignore")
+                    time.sleep(0.05)
+                # Valid response: a line "y N <float>" where N == probe_node
+                # (not an error/CAN message which would not start with "y N ")
+                if re.search(rf'(?m)^y {probe_node} [\d.]+', text):
+                    LUMINAIRE = probe_node
+                    break
+            if LUMINAIRE is None:
+                LUMINAIRE = 1
+                with lock:
+                    log_lines.append("Probe failed — defaulting to node 1")
+                print("[serial] Probe failed, defaulting to node 1")
+            else:
+                with lock:
+                    log_lines.append(f"Probe found node {LUMINAIRE}")
+                print(f"[serial] Probe detected node {LUMINAIRE}")
+
+        with lock:
+            state["status"] = f"Connected: {port} — node {LUMINAIRE}"
+        print(f"[serial] This is node {LUMINAIRE}")
+
+        # ── Phase 2: start streams now that we know the node number ─────────
         ser.write(f"s y {LUMINAIRE}\n".encode())
         time.sleep(0.05)
         ser.write(f"s u {LUMINAIRE}\n".encode())
 
-        with lock:
-            state["connected"] = True
-            state["status"] = f"Connected: {port}"
-        print(f"[serial] Connected to {port}")
-
+        # ── Phase 3: normal streaming loop ──────────────────────────────────
         while True:
             try:
                 line = ser.readline().decode(errors="ignore").strip()
