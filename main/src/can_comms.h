@@ -15,6 +15,16 @@
 #define MSG_U_OPT   0x21
 #define MSG_ACK     0xFF
 
+// Wake-up handshake
+#define MSG_SYN      0x10   // "I am here" — broadcast on boot
+#define MSG_SYN_ACK  0x11   // "I see you, here I am"
+#define MSG_ACK_DONE 0x12   // "I see you back, handshake complete"
+
+// Distributed calibration
+#define MSG_CAL_ON   0x30   // "I am turning my LED on, measure me"
+#define MSG_CAL_LUX  0x31   // "Here is my LUX reading while you were on"
+#define MSG_CAL_DONE 0x32   // "I am done, next node go"
+
 // ── Broadcast address ────────────────────────────────────────────────────────
 #define BROADCAST   0x00
 
