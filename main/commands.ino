@@ -25,6 +25,7 @@
 extern float ref_high;     // Table 3: HIGH occupancy lower bound [LUX]
 extern float ref_low;      // Table 3: LOW  occupancy lower bound [LUX]
 extern float energy_cost;  // Table 3: energy cost coefficient
+extern volatile bool admm_pending;  // set true to trigger ADMM re-optimisation
 
 // ── printf helper that works with any Print& ─────────────────────────────
 // Arduino's Print base class has no printf(), so we snprintf into a temp
@@ -91,6 +92,8 @@ void commands(char *buffer, Print &out)
             pid.set_occupancy(mode);
             r = (mode == 2) ? ref_high : (mode == 1) ? ref_low : 0.0f;
             flicker_holdoff = FLICKER_EXCLUDE_SAMPLES;
+            // Occupancy change → lower bound L_i changes → re-optimise
+            admm_pending = true;
             PRINTF(out, "ack: occupancy=%d  r=%.1f LUX\n", mode, r);
         }
         break;
@@ -148,6 +151,8 @@ void commands(char *buffer, Print &out)
         pid.set_feedback(0);
         analogWrite(LED_PIN, 0);
         out.println("ack");
+        delay(100);
+        rp2040.reboot();
         break;
 
     // ── O <i> <val> : Set HIGH-occupancy lower bound (Table 3) ───────────────
@@ -173,6 +178,8 @@ void commands(char *buffer, Print &out)
         std::sscanf(buffer, "%c %d %f", &command, &luminaire_index, &value);
         if (LUMINAIRE == luminaire_index) {
             energy_cost = value;
+            // Cost change → cost vector c_i changes → re-optimise
+            admm_pending = true;
             out.println("ack");
         }
         break;

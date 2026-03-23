@@ -9,16 +9,28 @@
 #define MSG_SET_OCC 0x04
 #define MSG_GET     0x05
 #define MSG_REPLY   0x06
-#define MSG_HELLO   0x10
-#define MSG_READY   0x11
 #define MSG_LAMBDA  0x20
 #define MSG_U_OPT   0x21
 #define MSG_ACK     0xFF
+
+//Reboot
+#define MSG_REBOOT 0x07
+// ── New set-command message types (Part 2 hub forwarding) ────────────────────
+#define MSG_SET_DUTY    0x08   // set open-loop duty     data[1..4]=float
+#define MSG_SET_FBCK    0x09   // set feedback on/off    data[1]=uint8
+#define MSG_SET_AW      0x0A   // set anti-windup mode   data[1]=uint8
+#define MSG_SET_OCC_HI  0x0B   // set HIGH occ bound     data[1..4]=float
+#define MSG_SET_OCC_LO  0x0C   // set LOW  occ bound     data[1..4]=float
+#define MSG_SET_COST    0x0D   // set energy cost        data[1..4]=float
+#define MSG_STREAM_ON   0x0E   // start stream  data[1]=variable char
+#define MSG_STREAM_OFF  0x0F   // stop  stream  data[1]=variable char
+
 
 // Wake-up handshake
 #define MSG_SYN      0x10   // "I am here" — broadcast on boot
 #define MSG_SYN_ACK  0x11   // "I see you, here I am"
 #define MSG_ACK_DONE 0x12   // "I see you back, handshake complete"
+#define MSG_CAL_READY 0x13
 
 // Distributed calibration
 #define MSG_CAL_ON   0x30   // "I am turning my LED on, measure me"
