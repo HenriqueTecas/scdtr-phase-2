@@ -563,9 +563,12 @@ void process_can_messages() {
         }
 
         case MSG_ADMM: {
+            uint8_t comp = frm.data[0]; // component index j (1..N)
             float val; memcpy(&val, frm.data + 1, 4);
-            admm_recv[src]     = val;   // src = luminaire index
-            admm_recv_new[src] = true;
+            if (comp >= 1 && comp <= ADMM_N) {
+                admm_recv[src][comp] = val;
+                admm_recv_count[src]++;
+            }
             break;
         }
 

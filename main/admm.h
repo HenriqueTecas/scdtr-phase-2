@@ -17,14 +17,14 @@
 //
 // ── Slide 6 key result ────────────────────────────────────────────────────────
 //   Σᵢ λᵢ^(k) = 0  always  →  ū^(k+1) = (1/N)·Σᵢ xᵢ^(k+1)  (plain average)
-//   Consequence: no need to broadcast λ. Only xᵢᵢ = u_i[LUMINAIRE] is sent.
+//   Consequence: no need to broadcast λ. Full xᵢ vector is broadcast.
 //
 // ── The three updates per iteration ──────────────────────────────────────────
 //   Step 1  x-update  (slide 10): compute zᵢ = ρ·ū − cᵢ − λᵢ,
 //                                 then solve min (1/2)ρu^Tu − u^Tzᵢ  s.t. u∈Cᵢ
 //           6 candidates (slides 12–18): unconstrained + 5 boundary points
-//   Step 2  broadcast x_ii to all peers via MSG_U_OPT, collect their x_jj
-//   Step 3  ū-update  (slide 6):  ū[j] = (1/N)·Σᵢ x_i[j]
+//   Step 2  broadcast full xᵢ to all peers via MSG_ADMM, collect their vectors
+//   Step 3  ū-update  (Eq. 4):   ū[j] = (1/N)·Σᵢ x_i[j]
 //           λ-update  (slide 5):  λᵢ += ρ·(xᵢ − ū)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -37,7 +37,7 @@
 static constexpr float         ADMM_RHO     = 0.07f;  // ρ  — penalty parameter
 static constexpr float         ADMM_EPS     = 1e-4f;  // convergence threshold
 static constexpr int           ADMM_MAXITER = 20;     // max iterations
-static constexpr unsigned long ADMM_TIMEOUT = 50;     // ms to wait for CAN peers
+static constexpr unsigned long ADMM_TIMEOUT = 150;    // ms to wait for CAN peers (N msgs each)
 
 // ── ADMM state (1-indexed, matching LUMINAIRE convention) ─────────────────────
 extern float admm_u[ADMM_N + 1];       // x_i : primal vector (proposed duties)
@@ -50,8 +50,8 @@ extern float admm_L;                   // L_i : illuminance lower bound
 extern float admm_n_sq;                // ‖kᵢ‖²
 extern float admm_m_sq;                // ‖kᵢ‖² − k_ii²
 
-extern float admm_recv    [ADMM_N + 1];
-extern bool  admm_recv_new[ADMM_N + 1];
+extern float admm_recv      [ADMM_N + 1][ADMM_N + 1]; // [src][component]
+extern int   admm_recv_count[ADMM_N + 1];              // msgs received per node
 
 // ── API ───────────────────────────────────────────────────────────────────────
 // Call admm_init() once after calibration and on every occupancy/cost change.

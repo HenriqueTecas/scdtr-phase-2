@@ -29,8 +29,8 @@ float admm_d_bg                = 0;
 float admm_L                   = 0;
 float admm_n_sq                = 0;
 float admm_m_sq                = 0;
-float admm_recv    [ADMM_N + 1] = {0};
-bool  admm_recv_new[ADMM_N + 1] = {false};
+float admm_recv      [ADMM_N + 1][ADMM_N + 1] = {{0}};
+int   admm_recv_count[ADMM_N + 1]             = {0};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // admm_init
@@ -85,9 +85,10 @@ void admm_init() {
     }
 
     // Seed receive buffers with the same estimate.
-    for (int j = 1; j <= ADMM_N; j++) {
-        admm_recv[j]     = u_ff;
-        admm_recv_new[j] = false;
+    for (int i = 1; i <= ADMM_N; i++) {
+        for (int j = 1; j <= ADMM_N; j++)
+            admm_recv[i][j] = u_ff;
+        admm_recv_count[i] = 0;
     }
 }
 
@@ -294,22 +295,28 @@ float admm_run() {
         step2:
 
         // ══════════════════════════════════════════════════════════════════════
-        // STEP 2 — BROADCAST OWN x_ii, COLLECT PEERS' x_jj  (slide 6)
+        // STEP 2 — BROADCAST FULL x_i VECTOR, COLLECT PEERS' VECTORS
         //
-        // Slide 6: "exchange the x_i^(k) among all nodes and average to get μ"
-        // Each node broadcasts only its own component — the one it controls.
-        // No λ broadcast needed because Σλ = 0 makes the ū formula reduce
-        // to a plain average (proved on slide 6).
+        // Each node broadcasts ALL N components of its primal vector x_i.
+        // This is required so that the consensus average ū_j = (1/N)·Σᵢ x_ij
+        // can be computed correctly. Broadcasting only x_ii would make the
+        // own-component residual always zero, preventing dual variable buildup
+        // and causing premature convergence to u=0.
         // ══════════════════════════════════════════════════════════════════════
 
-        can_send_float(BROADCAST, MSG_ADMM, SUB_ADMM_U_OPT, admm_u[LUMINAIRE]);
-        admm_recv[LUMINAIRE]     = admm_u[LUMINAIRE];
-        admm_recv_new[LUMINAIRE] = true;
+        // Broadcast all components: sub-type byte = component index j.
+        for (int j = 1; j <= ADMM_N; j++)
+            can_send_float(BROADCAST, MSG_ADMM, (uint8_t)j, admm_u[j]);
 
-        // Wait for all peers to send their x_jj.
+        // Store own values directly.
+        for (int j = 1; j <= ADMM_N; j++)
+            admm_recv[LUMINAIRE][j] = admm_u[j];
+        admm_recv_count[LUMINAIRE] = ADMM_N;
+
+        // Wait for all peers to send their full vectors (N messages each).
         {
             for (int p = 0; p < n_other_nodes; p++)
-                admm_recv_new[other_nodes[p]] = false;
+                admm_recv_count[other_nodes[p]] = 0;
 
             unsigned long t0 = millis();
             int heard = 0;
@@ -317,23 +324,24 @@ float admm_run() {
                 process_can_messages();
                 heard = 0;
                 for (int p = 0; p < n_other_nodes; p++)
-                    if (admm_recv_new[other_nodes[p]]) heard++;
+                    if (admm_recv_count[other_nodes[p]] >= ADMM_N) heard++;
             }
         }
 
         // ══════════════════════════════════════════════════════════════════════
-        // STEP 3 — ū UPDATE  (slide 6)
+        // STEP 3 — ū UPDATE  (Eq. 4)
         //
-        //   ū^(k+1)[j] = x_jj^(k+1)
+        //   ū_j^(k+1) = (1/N) · Σᵢ x_ij^(k+1)
         //
-        // Because Σλ = 0, the slide 5 formula ū = (1/N)·Σ(xᵢ + λᵢ/ρ) reduces
-        // to ū = (1/N)·Σxᵢ. But in consensus ADMM each node only broadcasts
-        // its own component x_jj. All nodes broadcast the same x_jj value so
-        // the average of N identical copies is just x_jj itself.
-        // Therefore: ū[j] = x_jj  (the value node j broadcast).
+        // Because Σλ = 0, the slide 5 formula reduces to a plain average
+        // of all nodes' primal vectors.
         // ══════════════════════════════════════════════════════════════════════
-        for (int j = 1; j <= ADMM_N; j++)
-            admm_u_avg[j] = admm_recv[j]; 
+        for (int j = 1; j <= ADMM_N; j++) {
+            float sum = 0.0f;
+            for (int i = 1; i <= ADMM_N; i++)
+                sum += admm_recv[i][j];
+            admm_u_avg[j] = sum / ADMM_N;
+        }
 
         // ══════════════════════════════════════════════════════════════════════
         // STEP 4 — λ UPDATE  (slide 5)
@@ -347,8 +355,13 @@ float admm_run() {
         for (int j = 1; j <= ADMM_N; j++)
             admm_lambda[j] += ADMM_RHO * (admm_u[j] - admm_u_avg[j]);
 
-        // ── Convergence: primal residual on own component ─────────────────────
-        float residual = fabsf(admm_u[LUMINAIRE] - admm_u_avg[LUMINAIRE]);
+        // ── Convergence: full primal residual ‖x_i − ū‖ ─────────────────────
+        float res_sq = 0.0f;
+        for (int j = 1; j <= ADMM_N; j++) {
+            float diff = admm_u[j] - admm_u_avg[j];
+            res_sq += diff * diff;
+        }
+        float residual = sqrtf(res_sq);
         if (residual < ADMM_EPS) {
             Serial.printf("[ADMM] converged k=%d  u_ii=%.4f  lambda_ii=%.4f\n",
                           iter + 1, admm_u[LUMINAIRE], admm_lambda[LUMINAIRE]);
