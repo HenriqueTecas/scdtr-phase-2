@@ -31,6 +31,7 @@ float admm_n_sq                = 0;
 float admm_m_sq                = 0;
 float admm_recv      [ADMM_N + 1][ADMM_N + 1] = {{0}};
 int   admm_recv_count[ADMM_N + 1]             = {0};
+bool  admm_running                             = false;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // admm_init
@@ -135,6 +136,8 @@ static double qp_cost(const float u[], const float z_i[]) {
 // for this node's LED, u_i[LUMINAIRE] ∈ [0,1].
 // ─────────────────────────────────────────────────────────────────────────────
 float admm_run() {
+
+    admm_running = true;
 
     for (int iter = 0; iter < ADMM_MAXITER; iter++) {
 
@@ -314,9 +317,17 @@ float admm_run() {
         admm_recv_count[LUMINAIRE] = ADMM_N;
 
         // Wait for all peers to send their full vectors (N messages each).
+        // Flush any stale ADMM messages that arrived outside the receive
+        // window (e.g. from the main loop's process_can_messages()), then
+        // reset both counters AND data to avoid mixing iterations.
         {
-            for (int p = 0; p < n_other_nodes; p++)
-                admm_recv_count[other_nodes[p]] = 0;
+            process_can_messages();           // drain queue first
+            for (int p = 0; p < n_other_nodes; p++) {
+                int nd = other_nodes[p];
+                admm_recv_count[nd] = 0;
+                for (int j = 1; j <= ADMM_N; j++)
+                    admm_recv[nd][j] = 0.0f;  // clear stale data
+            }
 
             unsigned long t0 = millis();
             int heard = 0;
@@ -369,5 +380,6 @@ float admm_run() {
         }
     }
 
+    admm_running = false;
     return admm_u[LUMINAIRE];
 }

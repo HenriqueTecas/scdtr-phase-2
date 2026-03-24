@@ -563,7 +563,8 @@ void process_can_messages() {
         }
 
         case MSG_ADMM: {
-            uint8_t comp = frm.data[0]; // component index j (1..N)
+            if (!admm_running) break;          // discard outside receive window
+            uint8_t comp = frm.data[0];        // component index j (1..N)
             float val; memcpy(&val, frm.data + 1, 4);
             if (comp >= 1 && comp <= ADMM_N) {
                 admm_recv[src][comp] = val;
