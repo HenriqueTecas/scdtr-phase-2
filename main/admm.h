@@ -50,11 +50,8 @@ extern float admm_L;                   // L_i : illuminance lower bound
 extern float admm_n_sq;                // ‖kᵢ‖²
 extern float admm_m_sq;                // ‖kᵢ‖² − k_ii²
 
-// ── CAN receive buffer ────────────────────────────────────────────────────────
-// admm_recv[addr] = last x_jj broadcast received from raw address addr
-// admm_recv_new[addr] = flag set by process_can_messages() on MSG_U_OPT arrival
-extern float admm_recv[256];
-extern bool  admm_recv_new[256];
+extern float admm_recv    [ADMM_N + 1];
+extern bool  admm_recv_new[ADMM_N + 1];
 
 // ── API ───────────────────────────────────────────────────────────────────────
 // Call admm_init() once after calibration and on every occupancy/cost change.

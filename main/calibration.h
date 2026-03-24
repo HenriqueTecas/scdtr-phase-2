@@ -3,6 +3,7 @@
 
 #include "Arduino.h"
 #include "lux.h"
+#include "pid.h"
 
 // ─── System gain calibration ────────────────────────────────
 extern float sys_gain;

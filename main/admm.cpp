@@ -3,9 +3,9 @@
 // Every formula is derived directly from Module 19 slides.
 // See admm.h for variable naming convention.
 // ─────────────────────────────────────────────────────────────────────────────
-
 #include "admm.h"
 #include "calibration.h"  // feedforward(), sys_background
+#include "pid.h"
 
 void process_can_messages();  // defined in main.ino
 
@@ -17,8 +17,6 @@ extern int     LUMINAIRE;
 extern int     n_other_nodes;
 extern uint8_t other_nodes[];
 extern float   sys_background;
-extern uint8_t UID_TABLE[3];   // UID_TABLE[j-1] = raw CAN address of luminaire j
-extern uint8_t node_address;
 extern PID     pid;
 
 // ── State ─────────────────────────────────────────────────────────────────────
@@ -31,8 +29,8 @@ float admm_d_bg                = 0;
 float admm_L                   = 0;
 float admm_n_sq                = 0;
 float admm_m_sq                = 0;
-float admm_recv[256]           = {0};
-bool  admm_recv_new[256]       = {false};
+float admm_recv    [ADMM_N + 1] = {0};
+bool  admm_recv_new[ADMM_N + 1] = {false};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // admm_init
@@ -87,9 +85,9 @@ void admm_init() {
     }
 
     // Seed receive buffers with the same estimate.
-    for (int a = 0; a < 256; a++) {
-        admm_recv[a]     = u_ff;
-        admm_recv_new[a] = false;
+    for (int j = 1; j <= ADMM_N; j++) {
+        admm_recv[j]     = u_ff;
+        admm_recv_new[j] = false;
     }
 }
 
@@ -304,11 +302,9 @@ float admm_run() {
         // to a plain average (proved on slide 6).
         // ══════════════════════════════════════════════════════════════════════
 
-        can_send_float(BROADCAST, MSG_U_OPT, admm_u[LUMINAIRE]);
-
-        // Seed own slot in the receive buffer immediately.
-        admm_recv[node_address]     = admm_u[LUMINAIRE];
-        admm_recv_new[node_address] = true;
+        can_send_float(BROADCAST, MSG_ADMM, SUB_ADMM_U_OPT, admm_u[LUMINAIRE]);
+        admm_recv[LUMINAIRE]     = admm_u[LUMINAIRE];
+        admm_recv_new[LUMINAIRE] = true;
 
         // Wait for all peers to send their x_jj.
         {
@@ -337,7 +333,7 @@ float admm_run() {
         // Therefore: ū[j] = x_jj  (the value node j broadcast).
         // ══════════════════════════════════════════════════════════════════════
         for (int j = 1; j <= ADMM_N; j++)
-            admm_u_avg[j] = admm_recv[UID_TABLE[j - 1]];
+            admm_u_avg[j] = admm_recv[j]; 
 
         // ══════════════════════════════════════════════════════════════════════
         // STEP 4 — λ UPDATE  (slide 5)
