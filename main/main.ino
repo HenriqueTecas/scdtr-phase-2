@@ -707,7 +707,7 @@ void handle_buffer_readout() {
 void setup() {
     Serial.begin(115200);
     delay(3000);
-    Serial.println("=== FIRMWARE v9 ===");
+    Serial.println("=== FIRMWARE v10 ===");
 
     queue_init(&can_rx_queue,      sizeof(struct can_frame), 128);
     queue_init(&can_tx_queue,      sizeof(struct can_frame), 32);
