@@ -112,6 +112,7 @@ void calibration_loop();
 void process_can_messages();
 
 static volatile bool admm_pending = false;
+static volatile bool admm_responder = false;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // admm_trigger
@@ -574,8 +575,9 @@ void process_can_messages() {
         }
 
         case MSG_CTRL:
-            if      (sub == SUB_ACK)    Serial.println("ack");
-            else if (sub == SUB_REBOOT) { delay(3000); rp2040.reboot(); }
+            if      (sub == SUB_ACK)           Serial.println("ack");
+            else if (sub == SUB_REBOOT)        { delay(3000); rp2040.reboot(); }
+            else if (sub == SUB_ADMM_TRIGGER)  { admm_pending = true; admm_responder = true; }
             break;
 
         default: break;
@@ -795,6 +797,10 @@ void loop() {
 
     if (admm_pending) {
         admm_pending = false;
+        if (!admm_responder) {
+            can_send_sub(BROADCAST, MSG_CTRL, SUB_ADMM_TRIGGER);
+        }
+        admm_responder = false;
         admm_trigger();
     }
 }

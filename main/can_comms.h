@@ -37,6 +37,7 @@
 // MSG_CTRL
 #define SUB_ACK         0x01
 #define SUB_REBOOT      0x02
+#define SUB_ADMM_TRIGGER 0x05
 // MSG_ADMM
 #define SUB_ADMM_U_OPT  0x01
 
