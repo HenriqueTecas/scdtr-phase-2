@@ -25,8 +25,8 @@ const float MAXIMUM_POWER = 0.0132f;
 
 // ─── Board identity ───────────────────────────────────────────────────────────
 #define N_NODES 3
-const uint8_t UID_TABLE[N_NODES] = { 33, 39, 54 };
-const float LDR_B_TABLE[N_NODES] = { 6.3044f, 6.3044f, 6.3044f };
+const uint8_t UID_TABLE[N_NODES] = { 33, 54, 39 };
+const float LDR_B_TABLE[N_NODES] = { 5.952f, 5.92f, 6.34f };
 const float LDR_M_TABLE[N_NODES] = { -0.8f,   -0.8f,   -0.8f   };
 
 float ldr_m;

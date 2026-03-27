@@ -46,16 +46,15 @@ void commands(char *buffer, Print &out)
     // ── Hub forwarding ──────────────────────────────────────────────────────
     // Parse the luminaire index from any command that has one
     // If it's not ours, forward the whole buffer over CAN and return
-    if (command != 'h' && command != 'R') {
+    if (command != 'h' && command != 'R' && command != 'c') {
         int idx = -1;
-        // Search for the first integer in the buffer after the command
         char *p = buffer + 1;
         while (*p && !isdigit(*p) && *p != '-') p++;
-        if (*p && sscanf(p, "%d", &idx) == 1) {
-            if (idx > 0 && idx != LUMINAIRE) {
-                hub_forward(buffer, (uint8_t)idx);
-                return;
-            }
+            if (*p && sscanf(p, "%d", &idx) == 1) {
+                if (idx > 0 && idx != LUMINAIRE) {
+                    hub_forward(buffer, (uint8_t)idx);
+                    return;
+                }
         }
     }
 
