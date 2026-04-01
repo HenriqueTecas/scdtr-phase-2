@@ -103,8 +103,9 @@ void commands(char *buffer, Print &out)
             r = (mode == 2) ? ref_high : (mode == 1) ? ref_low
                                                      : 0.0f;
             flicker_holdoff = FLICKER_EXCLUDE_SAMPLES;
-            // Occupancy change → lower bound L_i changes → re-optimise
-            admm_request(true);
+            // Occupancy change → lower bound L_i changes → re-optimise.
+            // This node is the initiator: broadcast ADMM_TRIGGER so all peers join.
+            admm_request(false);
             PRINTF(out, "ack: occupancy=%d  r=%.1f LUX\n", mode, r);
         }
         break;
@@ -212,8 +213,9 @@ void commands(char *buffer, Print &out)
         if (LUMINAIRE == luminaire_index)
         {
             energy_cost = value;
-            // Cost change → cost vector c_i changes → re-optimise
-            admm_request(true);
+            // Cost change → cost vector c_i changes → re-optimise.
+            // This node is the initiator: broadcast ADMM_TRIGGER so all peers join.
+            admm_request(false);
             out.println("ack");
         }
         break;

@@ -168,8 +168,14 @@ float admm_result()
 void admm_request(bool is_responder)
 {
     Serial.printf("[ADMM REQ] stage=%d responder=%d\n", (int)admm_stage, is_responder);
+    // Force-cancel a stuck run so a new occupancy/cost change is never silently
+    // ignored because a previous ADMM iteration got stuck in WAIT_PEERS.
     if (admm_stage != AdmmStage::IDLE && admm_stage != AdmmStage::DONE)
-        return;
+    {
+        Serial.println("[ADMM REQ] cancelling stuck run");
+        admm_stage = AdmmStage::IDLE;
+        admm_running = false;
+    }
     if (!is_responder)
         can_send_sub(BROADCAST, MSG_CTRL, SUB_ADMM_TRIGGER);
     admm_init();

@@ -488,7 +488,8 @@ void process_can_messages()
                 r = (mode == 2) ? ref_high : (mode == 1) ? ref_low
                                                          : 0.0f;
                 flicker_holdoff = FLICKER_EXCLUDE_SAMPLES;
-                admm_request(true);
+                // Do not start ADMM here — the hub will send ADMM_TRIGGER
+                // separately so all nodes start consensus together.
                 can_send_byte(src, MSG_CTRL, SUB_ACK, (uint8_t)LUMINAIRE);
                 break;
             }
@@ -537,7 +538,8 @@ void process_can_messages()
                 float val;
                 memcpy(&val, frm.data + 1, 4);
                 energy_cost = val;
-                admm_request(true);
+                // Do not start ADMM here — the hub will send ADMM_TRIGGER
+                // separately so all nodes start consensus together.
                 can_send_byte(src, MSG_CTRL, SUB_ACK, (uint8_t)LUMINAIRE);
                 break;
             }
@@ -758,6 +760,9 @@ void hub_forward(const char *cmd_str, uint8_t dest_node)
         int idx;
         sscanf(cmd_str, "%c %d %f", &command, &idx, &val);
         can_send_byte(dest_node, MSG_SET, 'o', (uint8_t)val);
+        // Hub is the initiator: MSG_SET updates the target node's r, then
+        // ADMM_TRIGGER (from admm_request below) starts consensus on all nodes.
+        admm_request(false);
         Serial.println("ack");
         return;
     }
@@ -803,6 +808,7 @@ void hub_forward(const char *cmd_str, uint8_t dest_node)
         int idx;
         sscanf(cmd_str, "%c %d %f", &command, &idx, &val);
         can_send_float(dest_node, MSG_SET, 'C', val);
+        admm_request(false);
         Serial.println("ack");
         return;
     }
