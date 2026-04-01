@@ -187,6 +187,19 @@ bool admm_tick()
 
     case AdmmStage::PRIMAL_UPDATE:
     {
+        // Reset peer receive buffers at the start of each iteration so that
+        // only messages from the current iteration are counted.  This must
+        // happen before the broadcast below; because loop() now calls
+        // admm_tick() before process_can_messages(), any peer messages that
+        // arrive after this reset will be accumulated correctly.
+        for (int p = 0; p < n_other_nodes; p++)
+        {
+            int nd = other_nodes[p];
+            admm_recv_count[nd] = 0;
+            for (int j = 1; j <= ADMM_N; j++)
+                admm_recv[nd][j] = 0.0f;
+        }
+
         float z_i[ADMM_N + 1];
         float k_dot_z = 0.0f;
         float z_ii = 0.0f;
@@ -278,14 +291,6 @@ bool admm_tick()
         for (int j = 1; j <= ADMM_N; j++)
             admm_recv[LUMINAIRE][j] = admm_u[j];
         admm_recv_count[LUMINAIRE] = ADMM_N;
-
-        for (int p = 0; p < n_other_nodes; p++)
-        {
-            int nd = other_nodes[p];
-            admm_recv_count[nd] = 0;
-            for (int j = 1; j <= ADMM_N; j++)
-                admm_recv[nd][j] = 0.0f;
-        }
 
         admm_stage = AdmmStage::WAIT_PEERS;
         return false;

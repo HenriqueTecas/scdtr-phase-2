@@ -971,8 +971,13 @@ void loop()
 
     serial_command();
     handle_buffer_readout();
-    process_can_messages();
-    calibration_loop();
+    // admm_tick must run BEFORE process_can_messages so that the PRIMAL_UPDATE
+    // reset of peer buffers happens before incoming CAN messages are accumulated.
+    // If process_can_messages ran first, a fast peer's broadcast could be
+    // accumulated and then wiped by the reset in the same loop iteration,
+    // leaving the node stuck in WAIT_PEERS.
     if (admm_tick())
         admm_apply_result();
+    process_can_messages();
+    calibration_loop();
 }
