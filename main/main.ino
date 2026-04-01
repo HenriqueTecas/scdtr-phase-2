@@ -178,7 +178,11 @@ void cal_advance_round()
                 Serial.printf("  k[%d][%d]=%.2f", i, j, coupling_gains[i][j]);
             Serial.println();
         }
-        admm_request(false);
+        // All nodes reach this point at calibration completion.
+        // Use is_responder=true so each node starts ADMM locally
+        // without broadcasting ADMM_TRIGGER — if every node broadcast,
+        // each would receive N-1 extra triggers and restart N-1 times.
+        admm_request(true);
     }
     else
     {

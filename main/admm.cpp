@@ -168,14 +168,8 @@ float admm_result()
 void admm_request(bool is_responder)
 {
     Serial.printf("[ADMM REQ] stage=%d responder=%d\n", (int)admm_stage, is_responder);
-    // Force-cancel a stuck run so a new occupancy/cost change is never silently
-    // ignored because a previous ADMM iteration got stuck in WAIT_PEERS.
     if (admm_stage != AdmmStage::IDLE && admm_stage != AdmmStage::DONE)
-    {
-        Serial.println("[ADMM REQ] cancelling stuck run");
-        admm_stage = AdmmStage::IDLE;
-        admm_running = false;
-    }
+        return;
     if (!is_responder)
         can_send_sub(BROADCAST, MSG_CTRL, SUB_ADMM_TRIGGER);
     admm_init();
@@ -193,19 +187,6 @@ bool admm_tick()
 
     case AdmmStage::PRIMAL_UPDATE:
     {
-        // Reset peer receive buffers at the start of each iteration so that
-        // only messages from the current iteration are counted.  This must
-        // happen before the broadcast below; because loop() now calls
-        // admm_tick() before process_can_messages(), any peer messages that
-        // arrive after this reset will be accumulated correctly.
-        for (int p = 0; p < n_other_nodes; p++)
-        {
-            int nd = other_nodes[p];
-            admm_recv_count[nd] = 0;
-            for (int j = 1; j <= ADMM_N; j++)
-                admm_recv[nd][j] = 0.0f;
-        }
-
         float z_i[ADMM_N + 1];
         float k_dot_z = 0.0f;
         float z_ii = 0.0f;
@@ -342,6 +323,18 @@ bool admm_tick()
             admm_running = false;
             admm_stage = AdmmStage::DONE;
             return true;
+        }
+
+        // Reset peer buffers here, after averages are computed, so the next
+        // PRIMAL_UPDATE starts clean.  Resetting in PRIMAL_UPDATE instead would
+        // wipe messages pre-accumulated from faster peers that already broadcast
+        // before this node ran its first PRIMAL_UPDATE (late-start scenario).
+        for (int p = 0; p < n_other_nodes; p++)
+        {
+            int nd = other_nodes[p];
+            admm_recv_count[nd] = 0;
+            for (int j = 1; j <= ADMM_N; j++)
+                admm_recv[nd][j] = 0.0f;
         }
 
         admm_stage = AdmmStage::PRIMAL_UPDATE;
