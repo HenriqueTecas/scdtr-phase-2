@@ -117,6 +117,27 @@ void network_wakeup();
 void calibration_loop();
 void process_can_messages();
 
+// Populate all_nodes[] with every luminaire index in sorted order so every
+// node agrees on the same per-round active node sequence.
+static void cal_build_node_list()
+{
+    all_nodes[0] = (uint8_t)LUMINAIRE;
+    for (int i = 0; i < n_other_nodes; i++)
+        all_nodes[i + 1] = other_nodes[i];
+    // Insertion sort — N_NODES is small (3)
+    for (int i = 1; i < N_NODES; i++)
+    {
+        uint8_t key = all_nodes[i];
+        int j = i - 1;
+        while (j >= 0 && all_nodes[j] > key)
+        {
+            all_nodes[j + 1] = all_nodes[j];
+            j--;
+        }
+        all_nodes[j + 1] = key;
+    }
+}
+
 static void admm_apply_result()
 {
     float r_admm = admm_d_bg;

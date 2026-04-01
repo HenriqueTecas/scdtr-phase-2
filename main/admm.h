@@ -52,6 +52,7 @@ extern float admm_m_sq;               // ‖kᵢ‖² − k_ii²
 
 extern float admm_recv[ADMM_N + 1][ADMM_N + 1]; // [src][component]
 extern int admm_recv_count[ADMM_N + 1];         // msgs received per node
+extern bool admm_running;                        // true while consensus is active
 
 // ── Consensus state machine ───────────────────────────────────────────────────
 enum class AdmmStage : uint8_t
