@@ -34,9 +34,11 @@
 #define ADMM_N 3 // number of nodes in the network
 
 // ── Tuning constants ──────────────────────────────────────────────────────────
-static constexpr float ADMM_RHO = 0.07f;           // ρ  — penalty parameter
+static constexpr float ADMM_RHO = 1.0f;            // ρ  — penalty parameter
 static constexpr float ADMM_EPS = 1e-4f;           // convergence threshold
-static constexpr int ADMM_MAXITER = 20;            // max iterations
+static constexpr float ADMM_LUX_TOL = 0.10f;       // acceptable averaged illuminance slack in lux
+static constexpr int ADMM_MAXITER = 80;            // soft iteration budget once the averaged solution is usable
+static constexpr int ADMM_MAXITER_HARD = 200;      // absolute safety cap if consensus remains under target
 static constexpr unsigned long ADMM_TIMEOUT = 150; // ms to wait for CAN peers (N msgs each)
 
 // ── ADMM state (1-indexed, matching LUMINAIRE convention) ─────────────────────
@@ -52,7 +54,7 @@ extern float admm_m_sq;               // ‖kᵢ‖² − k_ii²
 
 extern float admm_recv[ADMM_N + 1][ADMM_N + 1]; // [src][component]
 extern int admm_recv_count[ADMM_N + 1];         // msgs received per node
-extern bool admm_running;                        // true while consensus is active
+extern bool admm_running;                       // true while consensus is active
 
 // ── Consensus state machine ───────────────────────────────────────────────────
 enum class AdmmStage : uint8_t
@@ -72,3 +74,4 @@ void admm_start();
 bool admm_tick();
 float admm_result();
 void admm_request(bool is_responder);
+void admm_receive(uint8_t src, uint8_t comp, uint8_t iter, float val);

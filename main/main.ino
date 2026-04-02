@@ -408,37 +408,83 @@ void setup1()
 // =============================================================================
 void loop1()
 {
-    // TX: one frame per call to avoid back-to-back TX overflow
-    struct can_frame tx_frm;
-    if (queue_try_remove(&can_tx_queue, &tx_frm))
-        can0.sendMessage(&tx_frm);
+    // Keep one pending software-TX frame so a temporary "all TX buffers busy"
+    // condition does not silently drop a CAN frame.
+    static bool tx_pending = false;
+    static struct can_frame tx_frm;
+
+    if (!tx_pending)
+        tx_pending = queue_try_remove(&can_tx_queue, &tx_frm);
+
+    if (tx_pending)
+    {
+        MCP2515::ERROR tx_rc = can0.sendMessage(&tx_frm);
+        if (tx_rc == MCP2515::ERROR_OK)
+        {
+            tx_pending = false;
+        }
+        else if (tx_rc != MCP2515::ERROR_ALLTXBUSY)
+        {
+            Serial.printf("[CAN TX DROP] rc=%d id=0x%03lX dlc=%d\n",
+                          (int)tx_rc,
+                          (unsigned long)(tx_frm.can_id & CAN_SFF_MASK),
+                          tx_frm.can_dlc);
+            tx_pending = false;
+        }
+    }
 
     if (!can_got_irq && gpio_get(CAN_INT_PIN))
         return;
     can_got_irq = false;
 
     struct can_frame frm;
-    uint8_t irq = can0.getInterrupts();
-    uint8_t eflg = can0.getErrorFlags();
-
-    if (irq & MCP2515::CANINTF_RX0IF)
-        if (can0.readMessage(MCP2515::RXB0, &frm) == MCP2515::ERROR_OK)
-            queue_try_add(&can_rx_queue, &frm);
-
-    if (irq & MCP2515::CANINTF_RX1IF)
-        if (can0.readMessage(MCP2515::RXB1, &frm) == MCP2515::ERROR_OK)
-            queue_try_add(&can_rx_queue, &frm);
-
-    if (eflg & 0b11111000)
+    while (true)
     {
-        struct can_frame sentinel;
-        sentinel.can_id = 0xFFFFFFFF;
-        sentinel.can_dlc = 2;
-        sentinel.data[0] = irq;
-        sentinel.data[1] = eflg;
-        queue_try_add(&can_rx_queue, &sentinel);
-        can0.clearRXnOVRFlags();
-        can0.clearInterrupts();
+        uint8_t irq = can0.getInterrupts();
+        uint8_t eflg = can0.getErrorFlags();
+        bool handled = false;
+
+        if (irq & MCP2515::CANINTF_RX0IF)
+        {
+            if (can0.readMessage(MCP2515::RXB0, &frm) == MCP2515::ERROR_OK)
+                queue_try_add(&can_rx_queue, &frm);
+            handled = true;
+        }
+
+        if (irq & MCP2515::CANINTF_RX1IF)
+        {
+            if (can0.readMessage(MCP2515::RXB1, &frm) == MCP2515::ERROR_OK)
+                queue_try_add(&can_rx_queue, &frm);
+            handled = true;
+        }
+
+        bool error_irq = (irq & (MCP2515::CANINTF_ERRIF | MCP2515::CANINTF_MERRF)) != 0;
+        bool error_flag = (eflg & (MCP2515::EFLG_RX1OVR |
+                                   MCP2515::EFLG_RX0OVR |
+                                   MCP2515::EFLG_TXBO |
+                                   MCP2515::EFLG_TXEP |
+                                   MCP2515::EFLG_RXEP)) != 0;
+        if (error_irq || error_flag)
+        {
+            struct can_frame sentinel;
+            sentinel.can_id = 0xFFFFFFFF;
+            sentinel.can_dlc = 4;
+            sentinel.data[0] = irq;
+            sentinel.data[1] = eflg;
+            sentinel.data[2] = can0.errorCountRX();
+            sentinel.data[3] = can0.errorCountTX();
+            queue_try_add(&can_rx_queue, &sentinel);
+            if (eflg & (MCP2515::EFLG_RX0OVR | MCP2515::EFLG_RX1OVR))
+                can0.clearRXnOVRFlags();
+            if (irq & MCP2515::CANINTF_ERRIF)
+                can0.clearERRIF();
+            if (irq & MCP2515::CANINTF_MERRF)
+                can0.clearMERR();
+            handled = true;
+        }
+
+        if (!handled)
+            break;
     }
 }
 
@@ -456,8 +502,16 @@ void process_can_messages()
 
         if (frm.can_id == 0xFFFFFFFF)
         {
-            Serial.printf("[CAN ERR] CANINTF=0x%02X  EFLG=0x%02X\n",
-                          frm.data[0], frm.data[1]);
+            if (frm.can_dlc >= 4)
+            {
+                Serial.printf("[CAN ERR] CANINTF=0x%02X  EFLG=0x%02X  REC=%u  TEC=%u\n",
+                              frm.data[0], frm.data[1], frm.data[2], frm.data[3]);
+            }
+            else
+            {
+                Serial.printf("[CAN ERR] CANINTF=0x%02X  EFLG=0x%02X\n",
+                              frm.data[0], frm.data[1]);
+            }
             continue;
         }
 
@@ -627,7 +681,7 @@ void process_can_messages()
                 break;
             }
             memcpy(reply.data + 1, &val, 4);
-            queue_try_add(&can_tx_queue, &reply);
+            can_queue_tx(reply);
             break;
         }
 
@@ -692,22 +746,36 @@ void process_can_messages()
 
         case MSG_ADMM:
         {
+            if (frm.can_dlc >= 8 && frm.data[7] == ADMM_WIRE_MAGIC)
+            {
+                uint8_t iter = frm.data[0];
+                int16_t q1, q2, q3;
+                memcpy(&q1, frm.data + 1, sizeof(q1));
+                memcpy(&q2, frm.data + 3, sizeof(q2));
+                memcpy(&q3, frm.data + 5, sizeof(q3));
+                admm_receive(src, 1, iter, admm_wire_decode(q1));
+                admm_receive(src, 2, iter, admm_wire_decode(q2));
+                admm_receive(src, 3, iter, admm_wire_decode(q3));
+                break;
+            }
+
+            if (frm.can_dlc < 6)
+            {
+                Serial.printf("[ADMM RX DROP] legacy frame src=%d dlc=%d\n",
+                              src, frm.can_dlc);
+                break;
+            }
             uint8_t comp = frm.data[0]; // component index j (1..N)
+            uint8_t iter = frm.data[1];
             float val;
-            memcpy(&val, frm.data + 1, 4);
+            memcpy(&val, frm.data + 2, 4);
             if (!admm_running)
             {
-                Serial.printf("[ADMM RX DISCARD] admm_running=false  src=%d comp=%d val=%.4f  stage=%d\n",
-                              src, comp, val, (int)admm_stage);
-                break;                  // discard outside receive window
+                Serial.printf("[ADMM RX DISCARD] admm_running=false src=%d iter=%d comp=%d val=%.4f stage=%d\n",
+                              src, iter, comp, val, (int)admm_stage);
+                break; // discard outside receive window
             }
-            Serial.printf("[ADMM RX] src=%d comp=%d val=%.4f  recv_count_before=%d\n",
-                          src, comp, val, admm_recv_count[src]);
-            if (comp >= 1 && comp <= ADMM_N)
-            {
-                admm_recv[src][comp] = val;
-                admm_recv_count[src]++;
-            }
+            admm_receive(src, comp, iter, val);
             break;
         }
 
@@ -833,7 +901,7 @@ void hub_forward(const char *cmd_str, uint8_t dest_node)
         msg.data[0] = 's';
         msg.data[1] = (uint8_t)var;
         msg.data[2] = (command == 's') ? 1 : 0;
-        queue_try_add(&can_tx_queue, &msg);
+        can_queue_tx(msg);
         Serial.println("ack");
         return;
     }
@@ -908,10 +976,10 @@ void setup()
 {
     Serial.begin(115200);
     delay(3000);
-    Serial.println("=== FIRMWARE v10 ===");
+    Serial.println("=== FIRMWARE v11 ===");
 
-    queue_init(&can_rx_queue, sizeof(struct can_frame), 128);
-    queue_init(&can_tx_queue, sizeof(struct can_frame), 32);
+    queue_init(&can_rx_queue, sizeof(struct can_frame), 256);
+    queue_init(&can_tx_queue, sizeof(struct can_frame), 64);
     queue_init(&core1_ready_queue, sizeof(uint8_t), 1);
 
     analogReadResolution(ADC_BITS);
@@ -1008,11 +1076,9 @@ void loop()
 
     serial_command();
     handle_buffer_readout();
-    // admm_tick must run BEFORE process_can_messages so that the PRIMAL_UPDATE
-    // reset of peer buffers happens before incoming CAN messages are accumulated.
-    // If process_can_messages ran first, a fast peer's broadcast could be
-    // accumulated and then wiped by the reset in the same loop iteration,
-    // leaving the node stuck in WAIT_PEERS.
+    // admm_tick must run BEFORE process_can_messages so stage transitions are
+    // visible before newly arrived ADMM packets are classified into the current
+    // or next receive window.
     if (admm_tick())
         admm_apply_result();
     process_can_messages();

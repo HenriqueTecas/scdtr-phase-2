@@ -30,8 +30,63 @@ float admm_L = 0;
 float admm_n_sq = 0;
 float admm_m_sq = 0;
 float admm_recv[ADMM_N + 1][ADMM_N + 1] = {{0}};
+static bool admm_recv_seen[ADMM_N + 1][ADMM_N + 1] = {{false}};
 int admm_recv_count[ADMM_N + 1] = {0};
+static float admm_recv_next[ADMM_N + 1][ADMM_N + 1] = {{0}};
+static bool admm_recv_next_seen[ADMM_N + 1][ADMM_N + 1] = {{false}};
+static int admm_recv_next_count[ADMM_N + 1] = {0};
 bool admm_running = false;
+
+static void admm_seed_window(float buf[][ADMM_N + 1],
+                             bool seen[][ADMM_N + 1],
+                             int count[],
+                             float seed)
+{
+    for (int i = 1; i <= ADMM_N; i++)
+    {
+        count[i] = 0;
+        for (int j = 1; j <= ADMM_N; j++)
+        {
+            buf[i][j] = seed;
+            seen[i][j] = false;
+        }
+    }
+}
+
+static void admm_store_component(float buf[][ADMM_N + 1],
+                                 bool seen[][ADMM_N + 1],
+                                 int count[],
+                                 uint8_t src, uint8_t comp, float val)
+{
+    if (!seen[src][comp])
+    {
+        seen[src][comp] = true;
+        count[src]++;
+    }
+    buf[src][comp] = val;
+}
+
+static void admm_promote_next_window()
+{
+    for (int p = 0; p < n_other_nodes; p++)
+    {
+        const int nd = other_nodes[p];
+        admm_recv_count[nd] = admm_recv_next_count[nd];
+        admm_recv_next_count[nd] = 0;
+
+        for (int j = 1; j <= ADMM_N; j++)
+        {
+            if (admm_recv_next_seen[nd][j])
+                admm_recv[nd][j] = admm_recv_next[nd][j];
+            else
+                admm_recv[nd][j] = admm_u_avg[j];
+
+            admm_recv_seen[nd][j] = admm_recv_next_seen[nd][j];
+            admm_recv_next[nd][j] = admm_u_avg[j];
+            admm_recv_next_seen[nd][j] = false;
+        }
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // admm_init
@@ -96,13 +151,10 @@ void admm_init()
         admm_u_avg[j] = u_ff;
     }
 
-    // Seed receive buffers with the same estimate.
-    for (int i = 1; i <= ADMM_N; i++)
-    {
-        for (int j = 1; j <= ADMM_N; j++)
-            admm_recv[i][j] = u_ff;
-        admm_recv_count[i] = 0;
-    }
+    // Seed current/next receive windows with the same estimate so a timeout
+    // falls back to the last known consensus instead of zero.
+    admm_seed_window(admm_recv, admm_recv_seen, admm_recv_count, u_ff);
+    admm_seed_window(admm_recv_next, admm_recv_next_seen, admm_recv_next_count, u_ff);
 
     Serial.printf("[ADMM INIT] occ=%d L_raw=%.2f L=%.2f d_bg=%.2f u_ff=%.4f\n",
                   occ, L_raw, admm_L, admm_d_bg, u_ff);
@@ -130,6 +182,21 @@ static bool feasible(const float u[])
     for (int j = 1; j <= ADMM_N; j++)
         k_dot_u += admm_k[j] * u[j];
     return k_dot_u >= admm_L - admm_d_bg - tol;
+}
+
+static float predicted_lux(const float u[])
+{
+    float lux = admm_d_bg;
+    for (int j = 1; j <= ADMM_N; j++)
+        lux += admm_k[j] * u[j];
+    return lux;
+}
+
+static bool avg_hits_local_target(const float u[])
+{
+    if (admm_L <= 0.0f)
+        return true;
+    return predicted_lux(u) + ADMM_LUX_TOL >= admm_L;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -163,7 +230,40 @@ void admm_start()
 
 float admm_result()
 {
-    return admm_u[LUMINAIRE];
+    return admm_u_avg[LUMINAIRE];
+}
+
+void admm_receive(uint8_t src, uint8_t comp, uint8_t iter, float val)
+{
+    if (src < 1 || src > ADMM_N || comp < 1 || comp > ADMM_N)
+    {
+        Serial.printf("[ADMM RX DROP] src=%d iter=%d comp=%d val=%.4f (invalid)\n",
+                      src, iter, comp, val);
+        return;
+    }
+
+    if (iter == (uint8_t)admm_iter)
+    {
+        const int before = admm_recv_count[src];
+        admm_store_component(admm_recv, admm_recv_seen, admm_recv_count,
+                             src, comp, val);
+        Serial.printf("[ADMM RX] src=%d iter=%d comp=%d val=%.4f recv_count_before=%d\n",
+                      src, iter, comp, val, before);
+        return;
+    }
+
+    if (iter == (uint8_t)(admm_iter + 1))
+    {
+        const int before = admm_recv_next_count[src];
+        admm_store_component(admm_recv_next, admm_recv_next_seen,
+                             admm_recv_next_count, src, comp, val);
+        Serial.printf("[ADMM RX EARLY] src=%d iter=%d comp=%d val=%.4f recv_count_before=%d\n",
+                      src, iter, comp, val, before);
+        return;
+    }
+
+    Serial.printf("[ADMM RX DROP] src=%d iter=%d comp=%d val=%.4f (expect %d or %d)\n",
+                  src, iter, comp, val, admm_iter, admm_iter + 1);
 }
 
 void admm_request(bool is_responder)
@@ -275,11 +375,13 @@ bool admm_tick()
 
         Serial.printf("[ADMM TX] iter=%d  x_i=[%.4f, %.4f, %.4f]\n",
                       admm_iter, admm_u[1], admm_u[2], admm_u[3]);
-        for (int j = 1; j <= ADMM_N; j++)
-            can_send_float(BROADCAST, MSG_ADMM, (uint8_t)j, admm_u[j]);
+        can_send_admm(BROADCAST, (uint8_t)admm_iter, admm_u);
 
         for (int j = 1; j <= ADMM_N; j++)
+        {
             admm_recv[LUMINAIRE][j] = admm_u[j];
+            admm_recv_seen[LUMINAIRE][j] = true;
+        }
         admm_recv_count[LUMINAIRE] = ADMM_N;
 
         admm_wait_start_ms = millis();
@@ -356,28 +458,38 @@ bool admm_tick()
             res_sq += diff * diff;
         }
         bool converged = (sqrtf(res_sq) < ADMM_EPS);
+        float avg_lux = predicted_lux(admm_u_avg);
+        bool avg_feasible = avg_hits_local_target(admm_u_avg);
 
-        if (converged || admm_iter >= ADMM_MAXITER)
+        if ((converged && avg_feasible) ||
+            (admm_iter >= ADMM_MAXITER && avg_feasible))
         {
-            Serial.printf("[ADMM] %s k=%d  u_ii=%.4f\n",
+            Serial.printf("[ADMM] %s k=%d  u_ii=%.4f  avg_lux=%.2f\n",
                           converged ? "converged" : "maxiter",
-                          admm_iter, admm_u[LUMINAIRE]);
+                          admm_iter, admm_u_avg[LUMINAIRE], avg_lux);
             admm_running = false;
             admm_stage = AdmmStage::DONE;
             return true;
         }
 
-        // Reset peer buffers here, after averages are computed, so the next
-        // PRIMAL_UPDATE starts clean.  Resetting in PRIMAL_UPDATE instead would
-        // wipe messages pre-accumulated from faster peers that already broadcast
-        // before this node ran its first PRIMAL_UPDATE (late-start scenario).
-        for (int p = 0; p < n_other_nodes; p++)
+        if (admm_iter == ADMM_MAXITER && !avg_feasible)
         {
-            int nd = other_nodes[p];
-            admm_recv_count[nd] = 0;
-            for (int j = 1; j <= ADMM_N; j++)
-                admm_recv[nd][j] = 0.0f;
+            Serial.printf("[ADMM] maxiter k=%d but avg_lux=%.2f < target=%.2f — extending iterations\n",
+                          admm_iter, avg_lux, admm_L);
         }
+
+        if (admm_iter >= ADMM_MAXITER_HARD)
+        {
+            Serial.printf("[ADMM] hardmax k=%d  avg_lux=%.2f < target=%.2f — best effort\n",
+                          admm_iter, avg_lux, admm_L);
+            admm_running = false;
+            admm_stage = AdmmStage::DONE;
+            return true;
+        }
+
+        // Promote packets that arrived one iteration early so we do not mix
+        // iteration k and k+1 vectors or drop the early packets outright.
+        admm_promote_next_window();
 
         admm_stage = AdmmStage::PRIMAL_UPDATE;
         return false;

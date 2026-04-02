@@ -47,6 +47,33 @@ extern int      LUMINAIRE;
 extern queue_t  can_tx_queue;
 
 // ── Frame builders ────────────────────────────────────────────────────────────
+inline void can_queue_tx(const struct can_frame &msg) {
+    queue_add_blocking(&can_tx_queue, &msg);
+}
+
+// ADMM transport uses one packed CAN frame per iteration.
+// Each component is quantized as signed Q11 fixed-point with scale 2048,
+// which keeps the full vector inside the 8-byte CAN payload.
+static constexpr float ADMM_WIRE_SCALE = 2048.0f;
+static constexpr float ADMM_WIRE_MIN = -16.0f;
+static constexpr float ADMM_WIRE_MAX = 15.9995f;
+static constexpr uint8_t ADMM_WIRE_MAGIC = 0xA5;
+
+inline int16_t admm_wire_encode(float value) {
+    if (value < ADMM_WIRE_MIN)
+        value = ADMM_WIRE_MIN;
+    else if (value > ADMM_WIRE_MAX)
+        value = ADMM_WIRE_MAX;
+
+    float scaled = value * ADMM_WIRE_SCALE;
+    scaled += (scaled >= 0.0f) ? 0.5f : -0.5f;
+    return (int16_t)scaled;
+}
+
+inline float admm_wire_decode(int16_t raw) {
+    return (float)raw / ADMM_WIRE_SCALE;
+}
+
 inline void can_send_float(uint8_t dest, uint8_t msg_type,
                            uint8_t sub, float value) {
     struct can_frame msg;
@@ -54,7 +81,7 @@ inline void can_send_float(uint8_t dest, uint8_t msg_type,
     msg.can_dlc = 5;
     msg.data[0] = sub;
     memcpy(msg.data + 1, &value, 4);
-    queue_try_add(&can_tx_queue, &msg);
+    can_queue_tx(msg);
 }
 
 inline void can_send_byte(uint8_t dest, uint8_t msg_type,
@@ -64,7 +91,7 @@ inline void can_send_byte(uint8_t dest, uint8_t msg_type,
     msg.can_dlc = 2;
     msg.data[0] = sub;
     msg.data[1] = val;
-    queue_try_add(&can_tx_queue, &msg);
+    can_queue_tx(msg);
 }
 
 inline void can_send_sub(uint8_t dest, uint8_t msg_type, uint8_t sub) {
@@ -72,5 +99,21 @@ inline void can_send_sub(uint8_t dest, uint8_t msg_type, uint8_t sub) {
     msg.can_id  = MAKE_CAN_ID(msg_type, dest, LUMINAIRE);
     msg.can_dlc = 1;
     msg.data[0] = sub;
-    queue_try_add(&can_tx_queue, &msg);
+    can_queue_tx(msg);
+}
+
+inline void can_send_admm(uint8_t dest, uint8_t iter, const float values[4]) {
+    struct can_frame msg;
+    msg.can_id  = MAKE_CAN_ID(MSG_ADMM, dest, LUMINAIRE);
+    msg.can_dlc = 8;
+    msg.data[0] = iter;
+
+    int16_t q1 = admm_wire_encode(values[1]);
+    int16_t q2 = admm_wire_encode(values[2]);
+    int16_t q3 = admm_wire_encode(values[3]);
+    memcpy(msg.data + 1, &q1, sizeof(q1));
+    memcpy(msg.data + 3, &q2, sizeof(q2));
+    memcpy(msg.data + 5, &q3, sizeof(q3));
+    msg.data[7] = ADMM_WIRE_MAGIC;
+    can_queue_tx(msg);
 }
