@@ -692,11 +692,17 @@ void process_can_messages()
 
         case MSG_ADMM:
         {
-            if (!admm_running)
-                break;                  // discard outside receive window
             uint8_t comp = frm.data[0]; // component index j (1..N)
             float val;
             memcpy(&val, frm.data + 1, 4);
+            if (!admm_running)
+            {
+                Serial.printf("[ADMM RX DISCARD] admm_running=false  src=%d comp=%d val=%.4f  stage=%d\n",
+                              src, comp, val, (int)admm_stage);
+                break;                  // discard outside receive window
+            }
+            Serial.printf("[ADMM RX] src=%d comp=%d val=%.4f  recv_count_before=%d\n",
+                          src, comp, val, admm_recv_count[src]);
             if (comp >= 1 && comp <= ADMM_N)
             {
                 admm_recv[src][comp] = val;

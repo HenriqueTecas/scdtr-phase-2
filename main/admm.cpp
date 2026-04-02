@@ -152,6 +152,7 @@ static double qp_cost(const float u[], const float z_i[])
 // ── State machine state ───────────────────────────────────────────────────────
 AdmmStage admm_stage = AdmmStage::IDLE;
 int admm_iter = 0;
+static unsigned long admm_wait_start_ms = 0;
 
 void admm_start()
 {
@@ -272,6 +273,8 @@ bool admm_tick()
                     admm_u[j] = best[j];
         }
 
+        Serial.printf("[ADMM TX] iter=%d  x_i=[%.4f, %.4f, %.4f]\n",
+                      admm_iter, admm_u[1], admm_u[2], admm_u[3]);
         for (int j = 1; j <= ADMM_N; j++)
             can_send_float(BROADCAST, MSG_ADMM, (uint8_t)j, admm_u[j]);
 
@@ -279,16 +282,55 @@ bool admm_tick()
             admm_recv[LUMINAIRE][j] = admm_u[j];
         admm_recv_count[LUMINAIRE] = ADMM_N;
 
+        admm_wait_start_ms = millis();
         admm_stage = AdmmStage::WAIT_PEERS;
         return false;
     }
 
     case AdmmStage::WAIT_PEERS:
     {
+        bool all_ready = true;
         for (int p = 0; p < n_other_nodes; p++)
             if (admm_recv_count[other_nodes[p]] < ADMM_N)
-                return false;
-        admm_stage = AdmmStage::DUAL_UPDATE;
+                all_ready = false;
+
+        if (all_ready)
+        {
+            admm_stage = AdmmStage::DUAL_UPDATE;
+            return false;
+        }
+
+        unsigned long elapsed = millis() - admm_wait_start_ms;
+
+        // Periodic status print every 50 ms
+        static unsigned long last_status_ms = 0;
+        if (millis() - last_status_ms >= 50)
+        {
+            last_status_ms = millis();
+            Serial.printf("[ADMM WAIT] iter=%d  elapsed=%lums\n", admm_iter, elapsed);
+            for (int p = 0; p < n_other_nodes; p++)
+            {
+                uint8_t nd = other_nodes[p];
+                Serial.printf("  peer %d: recv_count=%d/%d\n",
+                              nd, admm_recv_count[nd], ADMM_N);
+            }
+        }
+
+        // Timeout: force DUAL_UPDATE with whatever we have so the loop doesn't
+        // hang indefinitely, and print exactly which peer(s) failed to reply.
+        if (elapsed >= ADMM_TIMEOUT)
+        {
+            Serial.printf("[ADMM TIMEOUT] iter=%d  after %lums — forcing DUAL_UPDATE\n",
+                          admm_iter, elapsed);
+            for (int p = 0; p < n_other_nodes; p++)
+            {
+                uint8_t nd = other_nodes[p];
+                if (admm_recv_count[nd] < ADMM_N)
+                    Serial.printf("  MISSING peer %d: only %d/%d components received\n",
+                                  nd, admm_recv_count[nd], ADMM_N);
+            }
+            admm_stage = AdmmStage::DUAL_UPDATE;
+        }
         return false;
     }
 
