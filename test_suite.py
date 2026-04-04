@@ -57,7 +57,7 @@ SCENARIOS = [
     ("Occ(2,2,2) C=[1,10,1]", 2,2,2,  1,10, 1),
     ("Occ(2,2,2) C=[10,1,10]",2,2,2, 10, 1,10),
     ("Occ(2,2,2) C=[1,20,1]", 2,2,2,  1,20, 1),
-    ("Occ(2,2,2) C=[5,1,5]",  2,2,2,  0.25, 0.05, 0.25),
+    ("Occ(2,2,2) C=[5,1,5]",  2,2,2,  5, 1, 5),
 ]
 
 # ── Per-node connection state ──────────────────────────────────────────────────
@@ -264,8 +264,11 @@ def compute_metrics(lux_data: list, duty_data: list,
     Compute E, V, F from streaming data using equations (14)-(16) from PDF.
 
     E = Σ u_k · P_max · h
-    V = (1/T) Σ max(0, L − x̂_k)  where x̂_k = d + G·u_k
+    V = (1/T) Σ max(0, L − ŷ_k)  where ŷ_k is MEASURED lux (includes cross-coupling)
     F = 1/(T·h) · Σ_{Δu_k·Δu_{k−1}<0} (|Δu_k| + |Δu_{k−1}|)
+
+    V uses actual measured lux (not the single-node estimate d+G·u) so that spill
+    from neighbouring LEDs is correctly accounted for.
     """
     T = len(duty_data)
     if T == 0:
@@ -276,9 +279,13 @@ def compute_metrics(lux_data: list, duty_data: list,
     # Energy (J)
     E = float(np.sum(u) * MAXIMUM_POWER * h)
 
-    # Visibility error
-    x_hat = d + G * u
-    V = float(np.mean(np.maximum(0.0, L - x_hat))) if T > 0 else 0.0
+    # Visibility error — use actual measured lux when available
+    if lux_data:
+        y = np.array(lux_data[:T], dtype=float)   # align to duty length
+        V = float(np.mean(np.maximum(0.0, L - y)))
+    else:
+        x_hat = d + G * u
+        V = float(np.mean(np.maximum(0.0, L - x_hat)))
 
     # Flicker
     if T >= 3:
@@ -317,9 +324,40 @@ def parse_cal_params(node: Node) -> tuple:
                 d = float(m.group(1))
     return (G or 1.0, d or 0.0)
 
+def dump_coupling_gains():
+    """Print the full 3x3 coupling-gain matrix (k[i][j]) from each node.
+    Uses 'g k <nid>' which prints: k <nid> <k[nid][1]> <k[nid][2]> <k[nid][3]>
+    This is essential for diagnosing ADMM infeasibility when a node can't reach its target.
+    """
+    print("\n  Coupling-gain matrix  k[i][j]  (node i's sensor, node j's LED):")
+    for nid in range(1, N_NODES + 1):
+        n = node_by_id.get(nid)
+        if not n:
+            continue
+        n.flush()
+        n.write(f"g k {nid}")
+        line = n.wait_line(rf"^k {nid}\b", timeout=3.0)
+        if line:
+            parts = line.split()
+            if len(parts) >= 5:
+                try:
+                    k1, k2, k3 = float(parts[2]), float(parts[3]), float(parts[4])
+                    print(f"    Node {nid}: k[{nid}][1]={k1:.4f}  k[{nid}][2]={k2:.4f}  k[{nid}][3]={k3:.4f}  "
+                          f"(self-gain k[{nid}][{nid}]={[k1,k2,k3][nid-1]:.4f})")
+                except ValueError:
+                    print(f"    Node {nid}: parse error: {line}")
+        else:
+            print(f"    Node {nid}: no response")
+
 # ── Run tests ──────────────────────────────────────────────────────────────────
 def run_tests() -> list:
     results = []
+
+    # Let any in-progress ADMM from a previous run drain before starting
+    print("  Waiting for nodes to idle…")
+    for nid in range(1, N_NODES + 1):
+        send(nid, f"o {nid} 0")  # all-off occupancy → ADMM will run and settle
+    time.sleep(ADMM_WAIT_S + 2)  # wait for ADMM + PI to reach steady state
 
     # Fetch calibration parameters once per node (they don't change)
     cal_params = {}
@@ -346,12 +384,24 @@ def run_tests() -> list:
             send(nid, f"C {nid} {costs[nid]}")
         time.sleep(0.5)
 
-        # ── 3. Apply occupancy (also triggers ADMM broadcast) ─────────────
+        # ── 3. Apply occupancy — NOTE: the first 'o' command triggers an
+        #       ADMM broadcast immediately, before the other nodes have
+        #       received their new occupancy.  We let this "stale" ADMM
+        #       finish, then re-trigger with all occupancies correctly set.
         for nid in range(1, N_NODES + 1):
             send(nid, f"o {nid} {occs[nid]}")
         time.sleep(0.3)
 
-        # ── 4. Wait for ADMM + PI settle ───────────────────────────────────
+        # Drain the stale ADMM (ran with old occupancy on peers)
+        wait_admm(ADMM_WAIT_S)
+        time.sleep(0.5)   # brief settle before re-trigger
+
+        # ── 3b. Re-trigger ADMM — now every node has the correct occupancy
+        for n in nodes:
+            n.admm_done = False
+        send(1, "T")      # Node 1 broadcasts ADMM_TRIGGER; all join correctly
+
+        # ── 4. Wait for correct ADMM + PI settle ──────────────────────────
         converged = wait_admm(ADMM_WAIT_S)
         print(f"  ADMM: {'converged ✓' if converged else 'timeout (continuing)'}")
         # Extra settle for PI to reach steady state
@@ -628,7 +678,7 @@ def plot_timeseries(results, out_dir):
 
 
 
-def run_convergence_study(out_dir):
+def run_convergence_study(out_dir, results):
     print("\n" + "="*60)
     print("  RESEARCH: ADMM Convergence Study (Occ 2,2,2)")
     print("="*60)
@@ -650,9 +700,12 @@ def run_convergence_study(out_dir):
     for iters in CONVERGENCE_STEPS:
         print(f"  Testing {iters} iterations...")
         for n in nodes: n.admm_done = False
-        
-        # Trigger ADMM with specific iteration count
-        node_by_id[1].write(f"T {iters}")
+
+        # Note: the 'T' command triggers ADMM but ignores any argument —
+        # ADMM_MAXITER is a compile-time constant. This study measures
+        # repeated steady-state trials at the default iteration limit,
+        # which is still informative for repeatability.
+        node_by_id[1].write(f"T")
         
         if wait_admm(ADMM_WAIT_S):
             time.sleep(2) # settle PI
@@ -862,6 +915,9 @@ if __name__ == "__main__":
     else:
         print("\n  WARNING: Calibration timed out.")
 
+    # ── 3b. Dump coupling-gain matrix for diagnostics ─────────────────────
+    dump_coupling_gains()
+
     # ── 4. Enable feedback on all nodes ────────────────────────────────────
     print("Enabling feedback…")
     for nid in range(1, N_NODES + 1):
@@ -885,7 +941,7 @@ if __name__ == "__main__":
     plot_metrics(results, out_dir)
     plot_timeseries(results, out_dir)
 
-    run_convergence_study(out_dir)
+    run_convergence_study(out_dir, results)
     print(f"\n✓ Done. Plots saved to: {out_dir}")
     print("Files: plot_steady_state_occupancy.png  plot_cost_comparison.png"
           "  plot_metrics.png  plot_ts_*.png")

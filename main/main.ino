@@ -140,21 +140,24 @@ static void cal_build_node_list()
 
 static void admm_apply_result()
 {
-    // Eq 13: r_i = d_i + k_ii * u_i*
-    // This makes the PI controller responsible only for this node's contribution,
-    // which prevents it from fighting neighbors during the transient.
-    float r_local = admm_d_bg + admm_k[LUMINAIRE] * admm_result();
+    // r_local = d_i + Σⱼ k_ij * ū_j : full ADMM-predicted illuminance at this desk.
+    // Using the sum over all nodes (not just own LED) ensures the PI setpoint equals
+    // the ADMM constraint target (~L), so actual lux converges to the occupancy target
+    // rather than only own-LED contribution (which under-shoots when peers contribute).
+    float r_local = admm_d_bg;
+    for (int j = 1; j <= ADMM_N; j++)
+        r_local += admm_k[j] * admm_u_avg[j];
 
     if (pid.get_feedback())
     {
         r = r_local;
         flicker_holdoff = FLICKER_EXCLUDE_SAMPLES;
-        Serial.printf("[ADMM] done  u*=%.4f  r_local=%.2f LUX\n", admm_result(), r_local);
+        Serial.printf("[ADMM] done  u*=%.4f  r_local=%.2f LUX\n", admm_u_avg[LUMINAIRE], r_local);
     }
     else
     {
         Serial.printf("[ADMM] done  u*=%.4f  r_local=%.2f LUX (feedback off)\n",
-                      admm_result(), r_local);
+                      admm_u_avg[LUMINAIRE], r_local);
     }
 }
 
