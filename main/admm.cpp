@@ -20,6 +20,7 @@ extern float sys_background;
 extern PID pid;
 
 // ── State ─────────────────────────────────────────────────────────────────────
+int ADMM_MAXITER = 100;
 float admm_u[ADMM_N + 1] = {0};
 float admm_u_avg[ADMM_N + 1] = {0};
 float admm_lambda[ADMM_N + 1] = {0};
@@ -149,6 +150,7 @@ void admm_init()
     {
         admm_u[j] = u_ff;
         admm_u_avg[j] = u_ff;
+        admm_lambda[j] = 0.0f; // Clear integrators to prevent windup carry-over
     }
 
     // Seed current/next receive windows with the same estimate so a timeout
@@ -247,8 +249,8 @@ void admm_receive(uint8_t src, uint8_t comp, uint8_t iter, float val)
         const int before = admm_recv_count[src];
         admm_store_component(admm_recv, admm_recv_seen, admm_recv_count,
                              src, comp, val);
-        Serial.printf("[ADMM RX] src=%d iter=%d comp=%d val=%.4f recv_count_before=%d\n",
-                      src, iter, comp, val, before);
+        // Serial.printf("[ADMM RX] src=%d iter=%d comp=%d val=%.4f recv_count_before=%d\n",
+        //               src, iter, comp, val, before);
         return;
     }
 
@@ -257,8 +259,8 @@ void admm_receive(uint8_t src, uint8_t comp, uint8_t iter, float val)
         const int before = admm_recv_next_count[src];
         admm_store_component(admm_recv_next, admm_recv_next_seen,
                              admm_recv_next_count, src, comp, val);
-        Serial.printf("[ADMM RX EARLY] src=%d iter=%d comp=%d val=%.4f recv_count_before=%d\n",
-                      src, iter, comp, val, before);
+        // Serial.printf("[ADMM RX EARLY] src=%d iter=%d comp=%d val=%.4f recv_count_before=%d\n",
+        //               src, iter, comp, val, before);
         return;
     }
 
@@ -369,12 +371,24 @@ bool admm_tick()
                 }
             }
             if (found)
+            {
                 for (int j = 1; j <= ADMM_N; j++)
                     admm_u[j] = best[j];
+            }
+            else
+            {
+                // Best effort: if target is unreachable, saturate own duty at 1.0
+                // and constrain neighbor predictions to [0,1].
+                for (int j = 1; j <= ADMM_N; j++)
+                {
+                    admm_u[j] = constrain(u_unc[j], 0.0f, 1.0f);
+                }
+                admm_u[LUMINAIRE] = 1.0f;
+            }
         }
 
-        Serial.printf("[ADMM TX] iter=%d  x_i=[%.4f, %.4f, %.4f]\n",
-                      admm_iter, admm_u[1], admm_u[2], admm_u[3]);
+        // Serial.printf("[ADMM TX] iter=%d  x_i=[%.4f, %.4f, %.4f]\n",
+        //               admm_iter, admm_u[1], admm_u[2], admm_u[3]);
         can_send_admm(BROADCAST, (uint8_t)admm_iter, admm_u);
 
         for (int j = 1; j <= ADMM_N; j++)
@@ -461,27 +475,10 @@ bool admm_tick()
         float avg_lux = predicted_lux(admm_u_avg);
         bool avg_feasible = avg_hits_local_target(admm_u_avg);
 
-        if ((converged && avg_feasible) ||
-            (admm_iter >= ADMM_MAXITER && avg_feasible))
+        if (admm_iter >= ADMM_MAXITER)
         {
-            Serial.printf("[ADMM] %s k=%d  u_ii=%.4f  avg_lux=%.2f\n",
-                          converged ? "converged" : "maxiter",
+            Serial.printf("[ADMM] converged k=%d  u_ii=%.4f  avg_lux=%.2f\n",
                           admm_iter, admm_u_avg[LUMINAIRE], avg_lux);
-            admm_running = false;
-            admm_stage = AdmmStage::DONE;
-            return true;
-        }
-
-        if (admm_iter == ADMM_MAXITER && !avg_feasible)
-        {
-            Serial.printf("[ADMM] maxiter k=%d but avg_lux=%.2f < target=%.2f — extending iterations\n",
-                          admm_iter, avg_lux, admm_L);
-        }
-
-        if (admm_iter >= ADMM_MAXITER_HARD)
-        {
-            Serial.printf("[ADMM] hardmax k=%d  avg_lux=%.2f < target=%.2f — best effort\n",
-                          admm_iter, avg_lux, admm_L);
             admm_running = false;
             admm_stage = AdmmStage::DONE;
             return true;

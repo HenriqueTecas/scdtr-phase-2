@@ -34,11 +34,11 @@
 #define ADMM_N 3 // number of nodes in the network
 
 // ── Tuning constants ──────────────────────────────────────────────────────────
-static constexpr float ADMM_RHO = 1.0f;            // ρ  — penalty parameter
+static constexpr float ADMM_RHO = 0.05f;            // ρ  — penalty parameter
 static constexpr float ADMM_EPS = 1e-4f;           // convergence threshold
 static constexpr float ADMM_LUX_TOL = 0.10f;       // acceptable averaged illuminance slack in lux
-static constexpr int ADMM_MAXITER = 80;            // soft iteration budget once the averaged solution is usable
-static constexpr int ADMM_MAXITER_HARD = 200;      // absolute safety cap if consensus remains under target
+extern int ADMM_MAXITER;                           // soft iteration budget once the averaged solution is usable
+static constexpr int ADMM_MAXITER_HARD = 100;      // absolute safety cap if consensus remains under target
 static constexpr unsigned long ADMM_TIMEOUT = 150; // ms to wait for CAN peers (N msgs each)
 
 // ── ADMM state (1-indexed, matching LUMINAIRE convention) ─────────────────────

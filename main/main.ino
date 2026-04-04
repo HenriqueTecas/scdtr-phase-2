@@ -54,8 +54,8 @@ float sys_background = 0.0f;
 bool calibrated = false;
 
 // ─── Phase 2 parameters ───────────────────────────────────────────────────────
-float ref_high = 30.0f;
-float ref_low = 20.0f;
+float ref_high = 20.0f;
+float ref_low = 10.0f;
 float energy_cost = 1.0f;
 
 // ─── Sampling ─────────────────────────────────────────────────────────────────
@@ -140,20 +140,21 @@ static void cal_build_node_list()
 
 static void admm_apply_result()
 {
-    float r_admm = admm_d_bg;
-    for (int j = 1; j <= ADMM_N; j++)
-        r_admm += admm_k[j] * admm_u_avg[j];
+    // Eq 13: r_i = d_i + k_ii * u_i*
+    // This makes the PI controller responsible only for this node's contribution,
+    // which prevents it from fighting neighbors during the transient.
+    float r_local = admm_d_bg + admm_k[LUMINAIRE] * admm_result();
 
     if (pid.get_feedback())
     {
-        r = r_admm;
+        r = r_local;
         flicker_holdoff = FLICKER_EXCLUDE_SAMPLES;
-        Serial.printf("[ADMM] done  u*=%.4f  r=%.2f LUX\n", admm_result(), r_admm);
+        Serial.printf("[ADMM] done  u*=%.4f  r_local=%.2f LUX\n", admm_result(), r_local);
     }
     else
     {
-        Serial.printf("[ADMM] done  u*=%.4f  r=%.2f LUX (feedback off)\n",
-                      admm_result(), r_admm);
+        Serial.printf("[ADMM] done  u*=%.4f  r_local=%.2f LUX (feedback off)\n",
+                      admm_result(), r_local);
     }
 }
 
@@ -695,6 +696,16 @@ void process_can_messages()
 
         case MSG_CAL:
         {
+            // Robust Barrier: any calibration message triggers a reset if finished
+            if (cal_stage == CalStage::CAL_DONE &&
+                (sub == SUB_CAL_READY || sub == SUB_CAL_ON))
+            {
+                cal_stage = CalStage::CAL_BARRIER;
+                cal_barrier_count = 0;
+                memset(cal_barrier_peers, 0, sizeof(cal_barrier_peers));
+                Serial.println("[CAL] Resetting state to BARRIER (remote trigger)");
+            }
+
             switch (sub)
             {
             case SUB_CAL_READY:
@@ -837,11 +848,8 @@ void hub_forward(const char *cmd_str, uint8_t dest_node)
         float val;
         int idx;
         sscanf(cmd_str, "%c %d %f", &command, &idx, &val);
-        can_send_byte(dest_node, MSG_SET, 'o', (uint8_t)val);
-        // Hub is the initiator: MSG_SET updates the target node's r, then
-        // ADMM_TRIGGER (from admm_request below) starts consensus on all nodes.
-        admm_request(false);
-        Serial.println("ack");
+        // Forwarding disabled for tests
+        Serial.println("ack (fwd off)");
         return;
     }
     if (command == 'f')
@@ -885,9 +893,8 @@ void hub_forward(const char *cmd_str, uint8_t dest_node)
         float val;
         int idx;
         sscanf(cmd_str, "%c %d %f", &command, &idx, &val);
-        can_send_float(dest_node, MSG_SET, 'C', val);
-        admm_request(false);
-        Serial.println("ack");
+        // Forwarding disabled for tests
+        Serial.println("ack (fwd off)");
         return;
     }
     if (command == 's' || command == 'S')

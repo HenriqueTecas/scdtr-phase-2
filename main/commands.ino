@@ -27,6 +27,11 @@ extern float ref_low;     // Table 3: LOW  occupancy lower bound [LUX]
 extern float energy_cost; // Table 3: energy cost coefficient
 void admm_request(bool is_responder);
 
+enum class CalStage : uint8_t;
+extern CalStage cal_stage;
+extern int cal_barrier_count;
+extern bool cal_barrier_peers[];
+
 // ── printf helper that works with any Print& ─────────────────────────────
 // Arduino's Print base class has no printf(), so we snprintf into a temp
 // buffer and call the universal print(const char*) method.
@@ -50,7 +55,7 @@ void commands(char *buffer, Print &out)
     // ── Hub forwarding ──────────────────────────────────────────────────────
     // Parse the luminaire index from any command that has one
     // If it's not ours, forward the whole buffer over CAN and return
-    if (command != 'h' && command != 'R' && command != 'c')
+    if (command != 'h' && command != 'R' && command != 'c' && command != 'i' && command != 'T')
     {
         int idx = -1;
         char *p = buffer + 1;
@@ -68,6 +73,17 @@ void commands(char *buffer, Print &out)
 
     switch (command)
     {
+
+    // ── i : Local identity (bypasses hub forwarding) ────────────────────────
+    case 'i':
+        PRINTF(out, "i %d\n", LUMINAIRE);
+        break;
+
+    // ── T : Start ADMM consensus across all nodes ────────────────────────────
+    case 'T':
+        admm_request(false);
+        out.println("ack");
+        break;
 
     // ── u <i> <val> : Set duty cycle (open-loop) ─────────────────────────────
     case 'u':
@@ -213,16 +229,22 @@ void commands(char *buffer, Print &out)
         if (LUMINAIRE == luminaire_index)
         {
             energy_cost = value;
-            // Cost change → cost vector c_i changes → re-optimise.
-            // This node is the initiator: broadcast ADMM_TRIGGER so all peers join.
-            admm_request(false);
             out.println("ack");
         }
         break;
 
     // ── c : Calibration + PID tuning commands ─────────────────────────────────
     case 'c':
+        sub_command = '\0';
         std::sscanf(buffer, "%c %c", &command, &sub_command);
+        if (sub_command == '\0')
+        {
+            cal_stage = CalStage::CAL_BARRIER;
+            cal_barrier_count = 0;
+            memset(cal_barrier_peers, 0, sizeof(cal_barrier_peers));
+            out.println("ack: calibration triggered");
+            break;
+        }
         switch (sub_command)
         {
         case 'b':
@@ -404,6 +426,16 @@ void commands(char *buffer, Print &out)
             {
                 float d_ext = max(0.0f, lux_value - sys_gain * duty_cycle);
                 PRINTF(out, "d %d %.4f\n", LUMINAIRE, d_ext);
+            }
+            break;
+
+        case 'k':
+            if (LUMINAIRE == luminaire_index)
+            {
+                PRINTF(out, "k %d %.4f %.4f %.4f\n", LUMINAIRE,
+                       coupling_gains[LUMINAIRE][1],
+                       coupling_gains[LUMINAIRE][2],
+                       coupling_gains[LUMINAIRE][3]);
             }
             break;
 
