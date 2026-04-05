@@ -699,12 +699,13 @@ def run_convergence_study(out_dir, results):
     
     for iters in CONVERGENCE_STEPS:
         print(f"  Testing {iters} iterations...")
+        # Set ADMM_MAXITER on every node before triggering
+        for n in nodes:
+            if n.node_id:
+                n.write(f"M {n.node_id} {iters}")
+        time.sleep(0.1)
         for n in nodes: n.admm_done = False
 
-        # Note: the 'T' command triggers ADMM but ignores any argument —
-        # ADMM_MAXITER is a compile-time constant. This study measures
-        # repeated steady-state trials at the default iteration limit,
-        # which is still informative for repeatability.
         node_by_id[1].write(f"T")
         
         if wait_admm(ADMM_WAIT_S):
@@ -732,6 +733,11 @@ def run_convergence_study(out_dir, results):
             print(f"    Total V={total_v:.2f}  Total E={total_e:.4f}")
         else:
             print("    Timeout!")
+
+    # Restore default iteration budget
+    for n in nodes:
+        if n.node_id:
+            n.write(f"M {n.node_id} 100")
 
     # Plot results
     if not convergence_results: return

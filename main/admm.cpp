@@ -221,11 +221,11 @@ static bool avg_hits_local_target(const float u[])
 // Constants that are the same for all candidates (terms in ū and λ) are
 // dropped — they cancel when comparing, so this is sufficient.
 // ─────────────────────────────────────────────────────────────────────────────
-static double qp_cost(const float u[], const float z_i[])
+static float qp_cost(const float u[], const float z_i[])
 {
-    double val = 0.0;
+    float val = 0.0f;
     for (int j = 1; j <= ADMM_N; j++)
-        val += 0.5 * ADMM_RHO * u[j] * u[j] - (double)u[j] * z_i[j];
+        val += 0.5f * ADMM_RHO * u[j] * u[j] - u[j] * z_i[j];
     return val;
 }
 
@@ -257,21 +257,15 @@ void admm_receive(uint8_t src, uint8_t comp, uint8_t iter, float val)
 
     if (iter == (uint8_t)admm_iter)
     {
-        const int before = admm_recv_count[src];
         admm_store_component(admm_recv, admm_recv_seen, admm_recv_count,
                              src, comp, val);
-        // Serial.printf("[ADMM RX] src=%d iter=%d comp=%d val=%.4f recv_count_before=%d\n",
-        //               src, iter, comp, val, before);
         return;
     }
 
     if (iter == (uint8_t)(admm_iter + 1))
     {
-        const int before = admm_recv_next_count[src];
         admm_store_component(admm_recv_next, admm_recv_next_seen,
                              admm_recv_next_count, src, comp, val);
-        // Serial.printf("[ADMM RX EARLY] src=%d iter=%d comp=%d val=%.4f recv_count_before=%d\n",
-        //               src, iter, comp, val, before);
         return;
     }
 
@@ -338,7 +332,7 @@ bool admm_tick()
         else
         {
             float best[ADMM_N + 1];
-            double best_cost = 1e30;
+            float best_cost = 1e30f;
             bool found = false;
 
             auto try_cand = [&](float cand[])
@@ -346,7 +340,7 @@ bool admm_tick()
                 clamp_peers(cand);
                 if (!feasible(cand))
                     return;
-                double c = qp_cost(cand, z_i);
+                float c = qp_cost(cand, z_i);
                 if (!found || c < best_cost)
                 {
                     best_cost = c;
@@ -519,7 +513,6 @@ bool admm_tick()
             float diff = admm_u[j] - admm_u_avg[j];
             res_sq += diff * diff;
         }
-        bool converged = (sqrtf(res_sq) < ADMM_EPS);
         float avg_lux = predicted_lux(admm_u_avg);
         bool avg_feasible = avg_hits_local_target(admm_u_avg);
 

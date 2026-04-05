@@ -25,6 +25,7 @@
 extern float ref_high;    // Table 3: HIGH occupancy lower bound [LUX]
 extern float ref_low;     // Table 3: LOW  occupancy lower bound [LUX]
 extern float energy_cost; // Table 3: energy cost coefficient
+extern int ADMM_MAXITER;  // admm.cpp global; exposed for 'M' command
 void admm_request(bool is_responder);
 
 enum class CalStage : uint8_t;
@@ -83,6 +84,16 @@ void commands(char *buffer, Print &out)
     case 'T':
         admm_request(false);
         out.println("ack");
+        break;
+
+    // ── M <i> <val> : Set ADMM max iterations (runtime; for convergence study) ─
+    case 'M':
+        std::sscanf(buffer, "%c %d %f", &command, &luminaire_index, &value);
+        if (LUMINAIRE == luminaire_index)
+        {
+            ADMM_MAXITER = constrain((int)value, 1, 500);
+            PRINTF(out, "ack: ADMM_MAXITER=%d\n", ADMM_MAXITER);
+        }
         break;
 
     // ── u <i> <val> : Set duty cycle (open-loop) ─────────────────────────────

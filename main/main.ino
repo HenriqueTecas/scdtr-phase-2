@@ -151,6 +151,7 @@ static void admm_apply_result()
     if (pid.get_feedback())
     {
         r = r_local;
+        pid.set_integrator(admm_u_avg[LUMINAIRE]); // seed from optimal duty to avoid wind-up transient
         flicker_holdoff = FLICKER_EXCLUDE_SAMPLES;
         Serial.printf("[ADMM] done  u*=%.4f  r_local=%.2f LUX\n", admm_u_avg[LUMINAIRE], r_local);
     }
@@ -851,8 +852,8 @@ void hub_forward(const char *cmd_str, uint8_t dest_node)
         float val;
         int idx;
         sscanf(cmd_str, "%c %d %f", &command, &idx, &val);
-        // Forwarding disabled for tests
-        Serial.println("ack (fwd off)");
+        can_send_byte(dest_node, MSG_SET, 'o', (uint8_t)val);
+        Serial.println("ack");
         return;
     }
     if (command == 'f')
@@ -896,8 +897,8 @@ void hub_forward(const char *cmd_str, uint8_t dest_node)
         float val;
         int idx;
         sscanf(cmd_str, "%c %d %f", &command, &idx, &val);
-        // Forwarding disabled for tests
-        Serial.println("ack (fwd off)");
+        can_send_float(dest_node, MSG_SET, 'C', val);
+        Serial.println("ack");
         return;
     }
     if (command == 's' || command == 'S')
