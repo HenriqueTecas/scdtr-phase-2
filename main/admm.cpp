@@ -310,20 +310,6 @@ bool admm_tick()
         for (int j = 1; j <= ADMM_N; j++)
             u_unc[j] = (1.0f / ADMM_RHO) * z_i[j];
 
-        // Clamp non-own duty estimates to [0,1].
-        // Each u[j] for j≠LUMINAIRE is an estimate of node j's physical duty cycle,
-        // which cannot leave [0,1]. Without clamping, after many iterations the dual
-        // variables λ drive z[j]/ρ to large negative values, making predicted_lux()
-        // artificially negative and causing ALL candidates (including C3 at own duty=1)
-        // to appear infeasible. The fix is to clamp peers before feasibility evaluation.
-        auto clamp_peers = [](float u[])
-        {
-            for (int j = 1; j <= ADMM_N; j++)
-                if (j != LUMINAIRE)
-                    u[j] = constrain(u[j], 0.0f, 1.0f);
-        };
-        clamp_peers(u_unc);
-
         if (feasible(u_unc))
         {
             for (int j = 1; j <= ADMM_N; j++)
@@ -337,7 +323,6 @@ bool admm_tick()
 
             auto try_cand = [&](float cand[])
             {
-                clamp_peers(cand);
                 if (!feasible(cand))
                     return;
                 float c = qp_cost(cand, z_i);
@@ -356,28 +341,6 @@ bool admm_tick()
                 for (int j = 1; j <= ADMM_N; j++)
                     u_c1[j] = (1.0f / ADMM_RHO) * z_i[j] - admm_k[j] * f;
                 try_cand(u_c1);
-
-                // C1b: peers clamped to [0,1], own duty set to minimum that still
-                // meets the illuminance constraint.  Needed when the C1 formula
-                // places a peer component above 1 (physically impossible); after
-                // clamping, illuminance drops below L and C1 is declared infeasible,
-                // forcing a wasteful fallback to C3 (own duty = 1).  C1b avoids this
-                // by fixing peers at their physical maximum and solving the 1-D
-                // problem for the minimum own duty.
-                {
-                    float cross = 0.0f;
-                    for (int j = 1; j <= ADMM_N; j++)
-                        if (j != LUMINAIRE)
-                            cross += admm_k[j] * constrain(u_c1[j], 0.0f, 1.0f);
-                    float min_own = (admm_k[LUMINAIRE] > 1e-6f)
-                                    ? (admm_L - admm_d_bg - cross) / admm_k[LUMINAIRE]
-                                    : 1.0f;
-                    float u_c1b[ADMM_N + 1];
-                    for (int j = 1; j <= ADMM_N; j++)
-                        u_c1b[j] = constrain(u_c1[j], 0.0f, 1.0f);
-                    u_c1b[LUMINAIRE] = constrain(min_own, 0.0f, 1.0f);
-                    try_cand(u_c1b);
-                }
             }
             {
                 float u_c2[ADMM_N + 1];
@@ -499,7 +462,7 @@ bool admm_tick()
             float sum = 0.0f;
             for (int i = 1; i <= ADMM_N; i++)
                 sum += admm_recv[i][j];
-            admm_u_avg[j] = sum / ADMM_N;
+            admm_u_avg[j] = constrain(sum / ADMM_N, 0.0f, 1.0f);
         }
 
         for (int j = 1; j <= ADMM_N; j++)

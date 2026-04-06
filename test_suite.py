@@ -643,13 +643,17 @@ def plot_timeseries(results, out_dir):
             node_res = r['nodes'].get(nid)
             if node_res:
                 data = node_res['stream']
+                col = PAL[nid - 1]
                 if data and data['t_lux']:
-                    axes[0].plot(data['t_lux'], data['lux'], label=f"Node {nid}  occ={node_res['occ']}  c={node_res['cost']}", alpha=0.9)
-        
-        axes[0].axhline(20, color=RED, lw=0.9, ls='--', alpha=0.6, label='ref_high=20')
-        axes[0].axhline(10, color=ORG, lw=0.9, ls='--', alpha=0.6, label='ref_low=10')
+                    axes[0].plot(data['t_lux'], data['lux'], color=col, lw=1.2,
+                                 label=f"Node {nid}  occ={node_res['occ']}  c={node_res['cost']}",
+                                 alpha=0.9)
+                L = node_res.get('L', 0)
+                if L > 0:
+                    axes[0].axhline(L, color=col, lw=0.9, ls='--', alpha=0.5,
+                                    label=f"L{nid}={L:.0f} lux")
         axes[0].set_ylabel("Illuminance [lux]", color=FG)
-        axes[0].set_title("LUX (dashed = lower bounds 10 / 20)", fontsize=9, color=FG)
+        axes[0].set_title("LUX (dashed = lower bound L per node)", fontsize=9, color=FG)
         axes[0].legend(loc='upper right', fontsize=8, facecolor=DARK, labelcolor=FG)
         axes[0].grid(True, color=GRID, alpha=0.3)
         axes[0].tick_params(colors=FG)
@@ -661,7 +665,8 @@ def plot_timeseries(results, out_dir):
             if node_res:
                 data = node_res['stream']
                 if data and data['t_duty']:
-                    axes[1].plot(data['t_duty'], data['duty'], label=f"Node {nid}", alpha=0.9)
+                    axes[1].plot(data['t_duty'], data['duty'], color=PAL[nid - 1],
+                                 lw=1.2, label=f"Node {nid}", alpha=0.9)
         axes[1].set_ylabel("Duty Cycle", color=FG)
         axes[1].set_xlabel("Time [s]", color=FG)
         axes[1].set_ylim(-0.05, 1.05)
@@ -676,6 +681,240 @@ def plot_timeseries(results, out_dir):
         plt.close(fig)
         print(f"  Saved: {fname}")
 
+
+
+def run_baseline(occs: dict, label: str) -> dict:
+    """
+    Non-coordinated control: PI only, reference set directly from occupancy.
+    No ADMM is triggered. Used as a comparison baseline.
+    """
+    REF_HIGH = 20.0
+    REF_LOW  = 10.0
+    SETTLE_S = 8.0
+
+    for nid in range(1, N_NODES + 1):
+        ref = REF_HIGH if occs[nid] == 2 else (REF_LOW if occs[nid] == 1 else 0.0)
+        send(nid, f"r {nid} {ref}")
+    time.sleep(SETTLE_S)
+
+    L_vals = {n.node_id: n.query('L') for n in nodes if n.node_id}
+    e0     = {n.node_id: n.query('E') for n in nodes if n.node_id}
+
+    stream = collect(COLLECT_S)
+
+    e1 = {n.node_id: n.query('E') for n in nodes if n.node_id}
+
+    result = {'label': label, 'occ': tuple(occs[i] for i in range(1, 4)),
+              'costs': (1, 1, 1), 'nodes': {}}
+
+    cal_params_local = {}
+    for n in nodes:
+        if n.node_id:
+            G, d = parse_cal_params(n)
+            cal_params_local[n.node_id] = (G, d)
+
+    for nid in range(1, N_NODES + 1):
+        d_ss  = stream.get(nid, {'lux': [], 'duty': [], 't_lux': [], 't_duty': []})
+        lux_ss, duty_ss = steady_state_mean(d_ss)
+        G, d_bg = cal_params_local.get(nid, (1.0, 0.0))
+        L = L_vals.get(nid) or 0.0
+        E_s, V_s, F_s = compute_metrics(d_ss['lux'], d_ss['duty'], L, d_bg, G)
+        result['nodes'][nid] = {
+            'lux_ss': lux_ss, 'duty_ss': duty_ss,
+            'E': E_s, 'V': V_s, 'F': F_s, 'L': L,
+            'stream': d_ss, 'occ': occs[nid], 'cost': 1,
+        }
+    return result
+
+
+def plot_comparison(admm_result: dict, baseline_result: dict, out_dir: str):
+    """2×2 grid: LUX and duty for ADMM (left) vs PI-only (right)."""
+    fig, axes = plt.subplots(2, 2, figsize=(16, 9), sharex='col')
+    fig.patch.set_facecolor(DARK)
+    fig.suptitle(
+        f"Coordinated (ADMM) vs Non-coordinated (PI only)  —  {admm_result['label']}",
+        color=FG, fontsize=12)
+
+    col_data = [admm_result, baseline_result]
+    col_titles = ["ADMM (coordinated)", "PI only (non-coordinated)"]
+
+    for col, (res, title) in enumerate(zip(col_data, col_titles)):
+        ax_lux  = axes[0][col]
+        ax_duty = axes[1][col]
+        ax_lux.set_facecolor(PANEL)
+        ax_duty.set_facecolor(PANEL)
+        _style(ax_lux)
+        _style(ax_duty)
+
+        total_E = 0.0
+        sum_V   = 0.0
+        sum_F   = 0.0
+        n_nodes = 0
+
+        for i, nid in enumerate(range(1, N_NODES + 1)):
+            nd  = res['nodes'].get(nid, {})
+            d   = nd.get('stream', {})
+            col_c = PAL[i]
+
+            if d.get('t_lux') and d.get('lux'):
+                t0 = d['t_lux'][0]
+                t  = [x - t0 for x in d['t_lux']]
+                ax_lux.plot(t, d['lux'], color=col_c, lw=1.2,
+                            label=f"Node {nid}  occ={nd.get('occ',0)}  c={nd.get('cost',1)}")
+            L = nd.get('L', 0)
+            if L > 0:
+                ax_lux.axhline(L, color=col_c, lw=0.9, ls='--', alpha=0.5,
+                               label=f"L{nid}={L:.0f} lux")
+
+            if d.get('t_duty') and d.get('duty'):
+                t0 = d['t_duty'][0]
+                t  = [x - t0 for x in d['t_duty']]
+                ax_duty.plot(t, d['duty'], color=col_c, lw=1.2, label=f"Node {nid}")
+
+            total_E += nd.get('E', 0)
+            sum_V   += nd.get('V', 0)
+            sum_F   += nd.get('F', 0)
+            n_nodes += 1
+
+        mean_V = sum_V / max(n_nodes, 1)
+        mean_F = sum_F / max(n_nodes, 1)
+        summary = f"E={total_E:.4f} J\nV={mean_V:.4f} lux\nF={mean_F:.4f} /s"
+        ax_lux.text(0.97, 0.97, summary, transform=ax_lux.transAxes,
+                    fontsize=7.5, va='top', ha='right', color=FG,
+                    bbox=dict(facecolor='#2a2a3e', alpha=0.7, edgecolor=GRID, pad=3))
+
+        ax_lux.set_title(title, fontsize=10, color=FG)
+        ax_lux.set_ylabel("Illuminance [lux]" if col == 0 else "", color=FG)
+        ax_lux.set_ylim(bottom=0)
+        _legend(ax_lux)
+
+        ax_duty.set_ylabel("Duty Cycle" if col == 0 else "", color=FG)
+        ax_duty.set_xlabel("Time [s]", color=FG)
+        ax_duty.set_ylim(-0.05, 1.1)
+        _legend(ax_duty)
+
+    plt.tight_layout()
+    path = os.path.join(out_dir, "plot_comparison_coordinated_vs_baseline.png")
+    fig.savefig(path, dpi=150, bbox_inches='tight', facecolor=DARK)
+    plt.close(fig)
+    print(f"  Saved: {path}")
+
+
+def run_disturbance_test(disturber_nid: int, out_dir: str):
+    """
+    Disturbance rejection test.
+    Assumes all nodes are already in coordinated (ADMM) steady state.
+
+    Timeline:
+      0 – 5 s   : steady-state collection
+      5 – 11 s  : disturber duty forced to 0.8 (feedback off)
+      11 – 17 s : feedback restored on disturber, PI recovers
+    """
+    print("\n" + "=" * 60)
+    print(f"  DISTURBANCE REJECTION TEST  (disturber = Node {disturber_nid})")
+    print("=" * 60)
+
+    T_STEADY  = 5.0
+    T_DISTURB = 6.0
+    T_RECOVER = 6.0
+    t_disturb_rel = T_STEADY
+    t_restore_rel = T_STEADY + T_DISTURB
+
+    # Clear buffers and start streaming manually
+    for n in nodes:
+        n.lux_buf.clear()
+        n.duty_buf.clear()
+    for n in nodes:
+        if n.node_id:
+            n.write(f"s y {n.node_id}")
+            n.write(f"s u {n.node_id}")
+
+    # Phase 1: steady state
+    print(f"  Collecting {T_STEADY:.0f}s steady state…")
+    time.sleep(T_STEADY)
+
+    # Phase 2: apply disturbance (disable feedback → force duty)
+    print(f"  Disturbance ON — Node {disturber_nid} duty → 0.8")
+    send(disturber_nid, f"f {disturber_nid} 0")
+    time.sleep(0.05)
+    send(disturber_nid, f"u {disturber_nid} 0.8")
+    time.sleep(T_DISTURB)
+
+    # Phase 3: restore feedback
+    print(f"  Disturbance OFF — restoring feedback on Node {disturber_nid}")
+    send(disturber_nid, f"f {disturber_nid} 1")
+    time.sleep(T_RECOVER)
+
+    # Stop streaming
+    for n in nodes:
+        if n.node_id:
+            n.write(f"S y {n.node_id}")
+            n.write(f"S u {n.node_id}")
+    time.sleep(0.3)
+
+    # Read buffers
+    stream = {}
+    for n in nodes:
+        if n.node_id:
+            with n.lock:
+                stream[n.node_id] = {
+                    't_lux':  [x[0] for x in n.lux_buf],
+                    'lux':    [x[1] for x in n.lux_buf],
+                    't_duty': [x[0] for x in n.duty_buf],
+                    'duty':   [x[1] for x in n.duty_buf],
+                }
+
+    L_vals = {n.node_id: (n.query('L') or 0.0) for n in nodes if n.node_id}
+
+    # Plot
+    fig, axes = plt.subplots(2, 1, figsize=(13, 8), sharex=True)
+    fig.patch.set_facecolor(DARK)
+    fig.suptitle(
+        f"Disturbance Rejection — Node {disturber_nid} duty forced to 0.8 at t≈{t_disturb_rel:.0f}s",
+        color=FG, fontsize=12)
+
+    for ax in axes:
+        _style(ax)
+
+    for i, nid in enumerate(range(1, N_NODES + 1)):
+        d   = stream.get(nid, {})
+        col = PAL[i]
+        if d.get('t_lux') and d.get('lux'):
+            t0 = d['t_lux'][0]
+            t  = [x - t0 for x in d['t_lux']]
+            axes[0].plot(t, d['lux'], color=col, lw=1.2, label=f"Node {nid}")
+            L = L_vals.get(nid, 0.0)
+            if L > 0:
+                axes[0].axhline(L, color=col, lw=0.8, ls='--', alpha=0.5,
+                                label=f"L{nid}={L:.0f} lux")
+        if d.get('t_duty') and d.get('duty'):
+            t0 = d['t_duty'][0]
+            t  = [x - t0 for x in d['t_duty']]
+            axes[1].plot(t, d['duty'], color=col, lw=1.2, label=f"Node {nid}")
+
+    for ax in axes:
+        ax.axvline(t_disturb_rel, color=RED, lw=1.2, ls='--', alpha=0.8,
+                   label=f"disturbance on (t={t_disturb_rel:.0f}s)")
+        ax.axvline(t_restore_rel, color=ORG, lw=1.2, ls='--', alpha=0.8,
+                   label=f"disturbance off (t={t_restore_rel:.0f}s)")
+
+    axes[0].set_ylabel("Illuminance [lux]")
+    axes[0].set_title("LUX — dashed horizontal = lower bound L, dashed vertical = disturbance events",
+                      fontsize=9)
+    axes[0].set_ylim(bottom=0)
+    _legend(axes[0])
+
+    axes[1].set_ylabel("Duty Cycle")
+    axes[1].set_xlabel("Time [s]")
+    axes[1].set_title("Duty Cycles", fontsize=9)
+    axes[1].set_ylim(-0.05, 1.1)
+    _legend(axes[1])
+
+    plt.tight_layout()
+    path = os.path.join(out_dir, "plot_disturbance_rejection.png")
+    fig.savefig(path, dpi=150, bbox_inches='tight', facecolor=DARK)
+    plt.close(fig)
+    print(f"  Saved: {path}")
 
 
 def run_convergence_study(out_dir, results):
@@ -811,10 +1050,14 @@ def run_convergence_study(out_dir, results):
                 axes[1].plot(t, d['duty'],
                              color=PAL[i], lw=1.2, label=f'Node {nid}')
 
-        axes[0].axhline(20, color=RED, lw=0.9, ls='--', alpha=0.6, label='ref_high=20')
-        axes[0].axhline(10, color=ORG, lw=0.9, ls='--', alpha=0.6, label='ref_low=10')
+        for i, nid in enumerate([1, 2, 3]):
+            nd = sc['nodes'].get(nid, {})
+            L = nd.get('L', 0)
+            if L > 0:
+                axes[0].axhline(L, color=PAL[i], lw=0.9, ls='--', alpha=0.5,
+                                label=f"L{nid}={L:.0f} lux")
         axes[0].set_ylabel('Illuminance [lux]')
-        axes[0].set_title('LUX (dashed = lower bounds 10 / 20)', fontsize=9)
+        axes[0].set_title('LUX (dashed = lower bound L per node)', fontsize=9)
         axes[0].set_ylim(bottom=0)
         _legend(axes[0])
 
@@ -947,6 +1190,38 @@ if __name__ == "__main__":
     plot_metrics(results, out_dir)
     plot_timeseries(results, out_dir)
 
+    # ── 8. Non-coordinated baseline comparison ─────────────────────────────
+    print("\nRunning non-coordinated baseline for comparison…")
+    # Reset costs to uniform before baseline so the comparison is fair
+    for nid in range(1, N_NODES + 1):
+        send(nid, f"C {nid} 1")
+    time.sleep(0.3)
+
+    baseline_all_high = run_baseline({1: 2, 2: 2, 3: 2}, "PI-only Occ(2,2,2)")
+
+    admm_all_high = next(
+        (r for r in results if r['label'] == "Occ(2,2,2) C=[1,1,1]"), None)
+
+    if admm_all_high:
+        plot_comparison(admm_all_high, baseline_all_high, out_dir)
+    else:
+        print("  [skip] plot_comparison — Occ(2,2,2) C=[1,1,1] result not found")
+
+    # ── 9. Disturbance rejection test ──────────────────────────────────────
+    print("\nRunning disturbance rejection test…")
+    # Re-establish coordinated steady state before probing disturbance rejection
+    for nid in range(1, N_NODES + 1):
+        send(nid, f"o {nid} 2")
+    time.sleep(0.3)
+    for n in nodes:
+        n.admm_done = False
+    send(1, "T")
+    wait_admm(ADMM_WAIT_S)
+    time.sleep(3)
+
+    run_disturbance_test(disturber_nid=2, out_dir=out_dir)
+
+    # ── 10. Convergence study ───────────────────────────────────────────────
     run_convergence_study(out_dir, results)
     print(f"\n✓ Done. Plots saved to: {out_dir}")
     print("Files: plot_steady_state_occupancy.png  plot_cost_comparison.png"
