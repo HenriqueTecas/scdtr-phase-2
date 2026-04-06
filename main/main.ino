@@ -771,38 +771,20 @@ void process_can_messages()
 
         case MSG_ADMM:
         {
-            if (frm.can_dlc >= 8 && (frm.data[7] & 0x7F) == ADMM_WIRE_MAGIC)
+            if (frm.can_dlc < 7)
             {
-                uint8_t iter = frm.data[0];
-                bool peer_wants_stop = (frm.data[7] & 0x80);
-                int16_t q1, q2, q3;
-                memcpy(&q1, frm.data + 1, sizeof(q1));
-                memcpy(&q2, frm.data + 3, sizeof(q2));
-                memcpy(&q3, frm.data + 5, sizeof(q3));
-                admm_receive(src, 1, iter, admm_wire_decode(q1));
-                admm_receive(src, 2, iter, admm_wire_decode(q2));
-                admm_receive(src, 3, iter, admm_wire_decode(q3));
-                admm_set_peer_converged(src, peer_wants_stop);
-                break;
-            }
-
-            if (frm.can_dlc < 6)
-            {
-                Serial.printf("[ADMM RX DROP] legacy frame src=%d dlc=%d\n",
+                Serial.printf("[ADMM RX DROP] packed frame too short src=%d dlc=%d\n",
                               src, frm.can_dlc);
                 break;
             }
-            uint8_t comp = frm.data[0]; // component index j (1..N)
-            uint8_t iter = frm.data[1];
-            float val;
-            memcpy(&val, frm.data + 2, 4);
-            if (!admm_running)
-            {
-                Serial.printf("[ADMM RX DISCARD] admm_running=false src=%d iter=%d comp=%d val=%.4f stage=%d\n",
-                              src, iter, comp, val, (int)admm_stage);
-                break; // discard outside receive window
-            }
-            admm_receive(src, comp, iter, val);
+            uint8_t iter = frm.data[0];
+            int16_t q1, q2, q3;
+            memcpy(&q1, frm.data + 1, sizeof(q1));
+            memcpy(&q2, frm.data + 3, sizeof(q2));
+            memcpy(&q3, frm.data + 5, sizeof(q3));
+            admm_receive(src, 1, iter, admm_wire_decode(q1));
+            admm_receive(src, 2, iter, admm_wire_decode(q2));
+            admm_receive(src, 3, iter, admm_wire_decode(q3));
             break;
         }
 

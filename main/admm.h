@@ -35,10 +35,7 @@
 
 // ── Tuning constants ──────────────────────────────────────────────────────────
 static constexpr float ADMM_RHO = 5.0f;            // ρ  — penalty parameter
-static constexpr float ADMM_EPS = 1e-4f;           // convergence threshold
-static constexpr float ADMM_LUX_TOL = 0.10f;       // acceptable averaged illuminance slack in lux
-extern int ADMM_MAXITER;                           // soft iteration budget once the averaged solution is usable
-static constexpr int ADMM_MAXITER_HARD = 150;      // absolute safety cap if consensus remains under target
+extern int ADMM_MAXITER;                           // fixed ADMM iteration budget
 static constexpr unsigned long ADMM_TIMEOUT = 150; // ms to wait for CAN peers (N msgs each)
 
 // ── ADMM state (1-indexed, matching LUMINAIRE convention) ─────────────────────
@@ -78,4 +75,3 @@ bool admm_tick();
 float admm_result();
 void admm_request(bool is_responder);
 void admm_receive(uint8_t src, uint8_t comp, uint8_t iter, float val);
-void admm_set_peer_converged(uint8_t src, bool converged);

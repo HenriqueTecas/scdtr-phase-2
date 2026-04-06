@@ -20,7 +20,7 @@ extern float sys_background;
 extern PID pid;
 
 // ── State ─────────────────────────────────────────────────────────────────────
-int ADMM_MAXITER = 100;
+int ADMM_MAXITER = 50;
 float admm_u[ADMM_N + 1] = {0};
 float admm_u_avg[ADMM_N + 1] = {0};
 float admm_lambda[ADMM_N + 1] = {0};
@@ -42,8 +42,6 @@ static int admm_recv_next_count[ADMM_N + 1] = {0};
 bool admm_running = false;
 
 static float admm_u_avg_prev[ADMM_N + 1] = {0};
-static bool admm_peer_converged[ADMM_N + 1] = {false};
-static bool admm_local_converged = false;
 
 static void admm_seed_window(float buf[][ADMM_N + 1],
                              bool seen[][ADMM_N + 1],
@@ -106,12 +104,8 @@ void admm_init()
 {
     admm_primal_res = 0;
     admm_dual_res = 0;
-    admm_local_converged = false;
     for (int j = 1; j <= ADMM_N; j++)
-    {
         admm_u_avg_prev[j] = 0.0f;
-        admm_peer_converged[j] = false;
-    }
 
     // k[j] = k_ij — coupling gain from node j's LED to THIS desk (slide 7).
     // Filled from the gain matrix measured during distributed calibration.
@@ -165,7 +159,7 @@ void admm_init()
     // the occupied node can correct within a few iterations.
     float u_ff = feedforward(L_raw);
     for (int j = 1; j <= ADMM_N; j++)
-        admm_lambda[j] = 0.0f; // Clear integrators to prevent windup carry-over
+        admm_lambda[j] = 0.0f;
     admm_u[LUMINAIRE]     = u_ff;
     admm_u_avg[LUMINAIRE] = u_ff;
     for (int j = 1; j <= ADMM_N; j++)
@@ -179,7 +173,7 @@ void admm_init()
 
     // Seed receive windows: own row uses u_ff; peer rows use 0.5 so a timeout
     // falls back to a neutral estimate rather than zero.
-    admm_seed_window(admm_recv, admm_recv_seen, admm_recv_count, 0.5f);
+    admm_seed_window(admm_recv,      admm_recv_seen,      admm_recv_count,      0.5f);
     admm_seed_window(admm_recv_next, admm_recv_next_seen, admm_recv_next_count, 0.5f);
     admm_recv[LUMINAIRE][LUMINAIRE]      = u_ff;
     admm_recv_next[LUMINAIRE][LUMINAIRE] = u_ff;
@@ -220,13 +214,6 @@ static float predicted_lux(const float u[])
     return lux;
 }
 
-static bool avg_hits_local_target(const float u[])
-{
-    if (admm_L <= 0.0f)
-        return true;
-    return predicted_lux(u) + ADMM_LUX_TOL >= admm_L;
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // QP objective — slide 10 simplified form
 //
@@ -255,12 +242,8 @@ void admm_start()
     admm_running = true;
     admm_primal_res = 0;
     admm_dual_res = 0;
-    admm_local_converged = false;
     for (int j = 1; j <= ADMM_N; j++)
-    {
         admm_u_avg_prev[j] = 0.0f;
-        admm_peer_converged[j] = false;
-    }
     admm_stage = AdmmStage::PRIMAL_UPDATE;
 }
 
@@ -294,12 +277,6 @@ void admm_receive(uint8_t src, uint8_t comp, uint8_t iter, float val)
 
     Serial.printf("[ADMM RX DROP] src=%d iter=%d comp=%d val=%.4f (expect %d or %d)\n",
                   src, iter, comp, val, admm_iter, admm_iter + 1);
-}
-
-void admm_set_peer_converged(uint8_t src, bool converged)
-{
-    if (src >= 1 && src <= ADMM_N)
-        admm_peer_converged[src] = converged;
 }
 
 void admm_request(bool is_responder)
@@ -423,7 +400,7 @@ bool admm_tick()
 
         // Serial.printf("[ADMM TX] iter=%d  x_i=[%.4f, %.4f, %.4f]\n",
         //               admm_iter, admm_u[1], admm_u[2], admm_u[3]);
-        can_send_admm(BROADCAST, (uint8_t)admm_iter, admm_u, admm_local_converged);
+        can_send_admm(BROADCAST, (uint8_t)admm_iter, admm_u);
 
         for (int j = 1; j <= ADMM_N; j++)
         {
@@ -514,33 +491,13 @@ bool admm_tick()
         admm_primal_res = sqrtf(res_sq_primal);
         admm_dual_res = ADMM_RHO * sqrtf(res_sq_dual);
 
-        admm_local_converged = (admm_primal_res < ADMM_EPS) && (admm_dual_res < ADMM_EPS);
-
-        bool all_converged = admm_local_converged;
-        for (int p = 0; p < n_other_nodes; p++)
-            all_converged &= admm_peer_converged[other_nodes[p]];
-
         float avg_lux = predicted_lux(admm_u_avg);
-        bool avg_feasible = avg_hits_local_target(admm_u_avg);
 
-        // Three-tier stopping:
-        //   Early exit — Consensus reached (all nodes agree on convergence) AND target met.
-        //   Soft stop   — ADMM_MAXITER reached AND solution is feasible.
-        //   Hard stop   — ADMM_MAXITER_HARD reached unconditionally.
-        bool early_exit = all_converged && avg_feasible;
-        bool soft_stop = avg_feasible && admm_iter >= ADMM_MAXITER;
-        bool hard_stop = admm_iter >= ADMM_MAXITER_HARD;
-
-        if (early_exit || soft_stop || hard_stop)
+        // Fixed-budget stop: residuals are recorded for plotting only.
+        if (admm_iter >= ADMM_MAXITER)
         {
-            const char* reason = early_exit ? "early-exit" : (soft_stop ? "soft-cap" : "hard-cap");
-            if (early_exit) {
-                Serial.printf("[ADMM] done k=%d  u_ii=%.4f  avg_lux=%.2f  %s (primal=%.5f dual=%.5f)\n",
-                              admm_iter, admm_u_avg[LUMINAIRE], avg_lux, reason, admm_primal_res, admm_dual_res);
-            } else {
-                Serial.printf("[ADMM] done k=%d  u_ii=%.4f  avg_lux=%.2f  %s\n",
-                              admm_iter, admm_u_avg[LUMINAIRE], avg_lux, reason);
-            }
+            Serial.printf("[ADMM] done k=%d  u_ii=%.4f  avg_lux=%.2f  fixed-cap (primal=%.5f dual=%.5f)\n",
+                          admm_iter, admm_u_avg[LUMINAIRE], avg_lux, admm_primal_res, admm_dual_res);
             admm_running = false;
             admm_stage = AdmmStage::DONE;
             return true;
