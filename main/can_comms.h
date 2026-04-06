@@ -36,10 +36,7 @@
 #define SUB_CAL_DONE    0x04
 // MSG_CTRL
 #define SUB_ACK         0x01
-#define SUB_REBOOT      0x02
 #define SUB_ADMM_TRIGGER 0x05
-// MSG_ADMM
-#define SUB_ADMM_U_OPT  0x01
 
 // ── Globals from main.ino ─────────────────────────────────────────────────────
 extern MCP2515  can0;
@@ -53,11 +50,10 @@ inline void can_queue_tx(const struct can_frame &msg) {
 
 // ADMM transport uses one packed CAN frame per iteration.
 // Each component is quantized as signed Q11 fixed-point with scale 2048,
-// which keeps the full vector inside the 8-byte CAN payload.
+// which keeps the full vector inside a 7-byte CAN payload.
 static constexpr float ADMM_WIRE_SCALE = 2048.0f;
 static constexpr float ADMM_WIRE_MIN = -16.0f;
 static constexpr float ADMM_WIRE_MAX = 15.9995f;
-static constexpr uint8_t ADMM_WIRE_MAGIC = 0xA5;
 
 inline int16_t admm_wire_encode(float value) {
     if (value < ADMM_WIRE_MIN)
@@ -105,7 +101,7 @@ inline void can_send_sub(uint8_t dest, uint8_t msg_type, uint8_t sub) {
 inline void can_send_admm(uint8_t dest, uint8_t iter, const float values[4]) {
     struct can_frame msg;
     msg.can_id  = MAKE_CAN_ID(MSG_ADMM, dest, LUMINAIRE);
-    msg.can_dlc = 8;
+    msg.can_dlc = 7;
     msg.data[0] = iter;
 
     int16_t q1 = admm_wire_encode(values[1]);
@@ -114,6 +110,5 @@ inline void can_send_admm(uint8_t dest, uint8_t iter, const float values[4]) {
     memcpy(msg.data + 1, &q1, sizeof(q1));
     memcpy(msg.data + 3, &q2, sizeof(q2));
     memcpy(msg.data + 5, &q3, sizeof(q3));
-    msg.data[7] = ADMM_WIRE_MAGIC;
     can_queue_tx(msg);
 }

@@ -25,7 +25,8 @@
 extern float ref_high;    // Table 3: HIGH occupancy lower bound [LUX]
 extern float ref_low;     // Table 3: LOW  occupancy lower bound [LUX]
 extern float energy_cost; // Table 3: energy cost coefficient
-extern int ADMM_MAXITER;  // admm.cpp global; exposed for 'M' command
+extern float admm_primal_res; // admm.cpp
+extern float admm_dual_res;   // admm.cpp
 void admm_request(bool is_responder);
 
 enum class CalStage : uint8_t;
@@ -56,7 +57,7 @@ void commands(char *buffer, Print &out)
     // ── Hub forwarding ──────────────────────────────────────────────────────
     // Parse the luminaire index from any command that has one
     // If it's not ours, forward the whole buffer over CAN and return
-    if (command != 'h' && command != 'R' && command != 'c' && command != 'i' && command != 'T')
+    if (command != 'h' && command != 'c' && command != 'i' && command != 'T')
     {
         int idx = -1;
         char *p = buffer + 1;
@@ -84,16 +85,6 @@ void commands(char *buffer, Print &out)
     case 'T':
         admm_request(false);
         out.println("ack");
-        break;
-
-    // ── M <i> <val> : Set ADMM max iterations (runtime; for convergence study) ─
-    case 'M':
-        std::sscanf(buffer, "%c %d %f", &command, &luminaire_index, &value);
-        if (LUMINAIRE == luminaire_index)
-        {
-            ADMM_MAXITER = constrain((int)value, 1, 500);
-            PRINTF(out, "ack: ADMM_MAXITER=%d\n", ADMM_MAXITER);
-        }
         break;
 
     // ── u <i> <val> : Set duty cycle (open-loop) ─────────────────────────────
@@ -199,19 +190,6 @@ void commands(char *buffer, Print &out)
                 stream_j = 0;
         }
         out.println("ack");
-        break;
-
-    // ── R : Restart / reset metrics (Table 3) ────────────────────────────────
-    case 'R':
-        resetMetrics();
-        r = 0.0f;
-        energy_cost = 1.0f;
-        pid.set_occupancy(0);
-        pid.set_feedback(0);
-        analogWrite(LED_PIN, 0);
-        out.println("ack");
-        delay(100);
-        rp2040.reboot();
         break;
 
     // ── O <i> <val> : Set HIGH-occupancy lower bound (Table 3) ───────────────
@@ -532,6 +510,16 @@ void commands(char *buffer, Print &out)
                 PRINTF(out, "C %d %.4f\n", LUMINAIRE, energy_cost);
             break;
 
+        case 'K':
+            if (LUMINAIRE == luminaire_index)
+                PRINTF(out, "K %d %.6f\n", LUMINAIRE, admm_primal_res);
+            break;
+
+        case 'J':
+            if (LUMINAIRE == luminaire_index)
+                PRINTF(out, "J %d %.6f\n", LUMINAIRE, admm_dual_res);
+            break;
+
         default:
             out.println("err: unknown get sub-command");
             break;
@@ -543,8 +531,10 @@ void commands(char *buffer, Print &out)
         out.println("=== SCDTR Command Reference (Phase 2) ===");
         out.println("Control:  r u f o a <i> <val>");
         out.println("Phase 2:  O <i> <lux>  HIGH bound | U <i> <lux>  LOW bound");
-        out.println("          C <i> <val>  energy cost | R  restart");
-        out.println("Get:      g y/u/r/v/o/a/f/d/p/t/E/V/F/O/U/L/C <i>");
+        out.println("          C <i> <val>  energy cost");
+        out.println("ADMM:     T  trigger consensus");
+        out.println("Get:      g y/u/r/v/o/a/f/d/p/t/E/V/F/O/U/L/C/K/J <i>");
+        out.println("          (K=primal res, J=dual res)");
         out.println("          g b y/u <i>  (hub/local only)");
         out.println("Calib:    c g | c s [n] | c b [v] | c m <v> | c ?");
         out.println("Tuning:   c p/i/B/t/w/f <i> <val>");

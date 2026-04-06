@@ -130,9 +130,27 @@ class Node:
 # ── Serial reader threads ──────────────────────────────────────────────────────
 def reader_thread(node: Node):
     try:
-        node.ser = serial.Serial(node.port, BAUD, timeout=1)
-        time.sleep(2)
+        node.ser = serial.Serial(node.port, BAUD, timeout=0.2)
+        # Read for 2.5 s instead of sleeping blindly: this captures the
+        # [BOOT] LUMINAIRE=N line the Pico prints on serial open (a DTR
+        # toggle can trigger a reset).  reset_input_buffer() would erase it.
+        boot_deadline = time.time() + 2.5
+        while time.time() < boot_deadline:
+            try:
+                raw = node.ser.readline().decode(errors="ignore").strip()
+            except Exception:
+                break
+            if not raw:
+                continue
+            with node.lock:
+                node._lines.append(raw)
+                if node.node_id is None:
+                    m = re.search(r'\[BOOT\] LUMINAIRE=(\d+)', raw)
+                    if m:
+                        node.node_id = int(m.group(1))
+                        print(f"  [{node.port}] → Node {node.node_id}")
         node.ser.reset_input_buffer()
+        node.ser.timeout = 1  # normal blocking readline timeout
         node.connected = True
         print(f"  [{node.port}] connected")
 
@@ -643,13 +661,17 @@ def plot_timeseries(results, out_dir):
             node_res = r['nodes'].get(nid)
             if node_res:
                 data = node_res['stream']
+                col = PAL[nid - 1]
                 if data and data['t_lux']:
-                    axes[0].plot(data['t_lux'], data['lux'], label=f"Node {nid}  occ={node_res['occ']}  c={node_res['cost']}", alpha=0.9)
-        
-        axes[0].axhline(20, color=RED, lw=0.9, ls='--', alpha=0.6, label='ref_high=20')
-        axes[0].axhline(10, color=ORG, lw=0.9, ls='--', alpha=0.6, label='ref_low=10')
+                    axes[0].plot(data['t_lux'], data['lux'], color=col, lw=1.2,
+                                 label=f"Node {nid}  occ={node_res['occ']}  c={node_res['cost']}",
+                                 alpha=0.9)
+                L = node_res.get('L', 0)
+                if L > 0:
+                    axes[0].axhline(L, color=col, lw=0.9, ls='--', alpha=0.5,
+                                    label=f"L{nid}={L:.0f} lux")
         axes[0].set_ylabel("Illuminance [lux]", color=FG)
-        axes[0].set_title("LUX (dashed = lower bounds 10 / 20)", fontsize=9, color=FG)
+        axes[0].set_title("LUX (dashed = lower bound L per node)", fontsize=9, color=FG)
         axes[0].legend(loc='upper right', fontsize=8, facecolor=DARK, labelcolor=FG)
         axes[0].grid(True, color=GRID, alpha=0.3)
         axes[0].tick_params(colors=FG)
@@ -661,7 +683,8 @@ def plot_timeseries(results, out_dir):
             if node_res:
                 data = node_res['stream']
                 if data and data['t_duty']:
-                    axes[1].plot(data['t_duty'], data['duty'], label=f"Node {nid}", alpha=0.9)
+                    axes[1].plot(data['t_duty'], data['duty'], color=PAL[nid - 1],
+                                 lw=1.2, label=f"Node {nid}", alpha=0.9)
         axes[1].set_ylabel("Duty Cycle", color=FG)
         axes[1].set_xlabel("Time [s]", color=FG)
         axes[1].set_ylim(-0.05, 1.05)
@@ -676,6 +699,299 @@ def plot_timeseries(results, out_dir):
         plt.close(fig)
         print(f"  Saved: {fname}")
 
+
+
+def run_single_admm(occs: dict, costs: dict, label: str) -> dict:
+    """
+    Run one fresh ADMM scenario and return results in the same format as run_tests().
+    Used to get a freshly-collected ADMM result for back-to-back comparison.
+    """
+    cal_params_local = {}
+    for n in nodes:
+        if n.node_id:
+            G, d = parse_cal_params(n)
+            cal_params_local[n.node_id] = (G, d)
+
+    for n in nodes:
+        n.admm_done = False
+
+    for nid in range(1, N_NODES + 1):
+        send(nid, f"C {nid} {costs[nid]}")
+    time.sleep(0.5)
+
+    # Apply occupancy — first 'o' on node 1 triggers a stale ADMM; drain it,
+    # then re-trigger with all occupancies set.  Same protocol as run_tests().
+    for nid in range(1, N_NODES + 1):
+        send(nid, f"o {nid} {occs[nid]}")
+    time.sleep(0.3)
+    wait_admm(ADMM_WAIT_S)
+    time.sleep(0.5)
+
+    for n in nodes:
+        n.admm_done = False
+    send(1, "T")
+    wait_admm(ADMM_WAIT_S)
+    time.sleep(4)   # extra PI settle
+
+    L_vals = {n.node_id: n.query('L') for n in nodes if n.node_id}
+    stream = collect(COLLECT_S)
+
+    result = {'label': label,
+              'occ':   tuple(occs[i]  for i in range(1, 4)),
+              'costs': tuple(costs[i] for i in range(1, 4)),
+              'nodes': {}}
+
+    for nid in range(1, N_NODES + 1):
+        d_ss = stream.get(nid, {'lux': [], 'duty': [], 't_lux': [], 't_duty': []})
+        lux_ss, duty_ss = steady_state_mean(d_ss)
+        G, d_bg = cal_params_local.get(nid, (1.0, 0.0))
+        L = L_vals.get(nid) or 0.0
+        E_s, V_s, F_s = compute_metrics(d_ss['lux'], d_ss['duty'], L, d_bg, G)
+        result['nodes'][nid] = {
+            'lux_ss': lux_ss, 'duty_ss': duty_ss,
+            'E': E_s, 'V': V_s, 'F': F_s, 'L': L,
+            'stream': d_ss, 'occ': occs[nid], 'cost': costs[nid],
+        }
+    return result
+
+
+def run_baseline(occs: dict, label: str) -> dict:
+    """
+    Non-coordinated control: PI only, reference set directly from occupancy.
+    No ADMM is triggered. Used as a comparison baseline.
+    """
+    REF_HIGH = 20.0
+    REF_LOW  = 10.0
+    SETTLE_S = 8.0
+
+    # Ensure feedback is on and seed integrators before setting the new reference.
+    # f <i> 1 calls apply_feedforward(r) in the firmware, which initialises the
+    # integrator at feedforward(r) so the PI starts from the right place rather
+    # than from the previous ADMM operating point.
+    for nid in range(1, N_NODES + 1):
+        ref = REF_HIGH if occs[nid] == 2 else (REF_LOW if occs[nid] == 1 else 0.0)
+        send(nid, f"r {nid} {ref}")   # set reference first so apply_feedforward uses it
+        send(nid, f"f {nid} 1")       # re-enable feedback + seed integrator
+    time.sleep(SETTLE_S)
+
+    L_vals = {n.node_id: n.query('L') for n in nodes if n.node_id}
+    e0     = {n.node_id: n.query('E') for n in nodes if n.node_id}
+
+    stream = collect(COLLECT_S)
+
+    e1 = {n.node_id: n.query('E') for n in nodes if n.node_id}
+
+    result = {'label': label, 'occ': tuple(occs[i] for i in range(1, 4)),
+              'costs': (1, 1, 1), 'nodes': {}}
+
+    cal_params_local = {}
+    for n in nodes:
+        if n.node_id:
+            G, d = parse_cal_params(n)
+            cal_params_local[n.node_id] = (G, d)
+
+    for nid in range(1, N_NODES + 1):
+        d_ss  = stream.get(nid, {'lux': [], 'duty': [], 't_lux': [], 't_duty': []})
+        lux_ss, duty_ss = steady_state_mean(d_ss)
+        G, d_bg = cal_params_local.get(nid, (1.0, 0.0))
+        L = L_vals.get(nid) or 0.0
+        E_s, V_s, F_s = compute_metrics(d_ss['lux'], d_ss['duty'], L, d_bg, G)
+        result['nodes'][nid] = {
+            'lux_ss': lux_ss, 'duty_ss': duty_ss,
+            'E': E_s, 'V': V_s, 'F': F_s, 'L': L,
+            'stream': d_ss, 'occ': occs[nid], 'cost': 1,
+        }
+    return result
+
+
+def plot_comparison(admm_result: dict, baseline_result: dict, out_dir: str):
+    """2×2 grid: LUX and duty for ADMM (left) vs PI-only (right)."""
+    fig, axes = plt.subplots(2, 2, figsize=(16, 9), sharex='col')
+    fig.patch.set_facecolor(DARK)
+    fig.suptitle(
+        f"Coordinated (ADMM) vs Non-coordinated (PI only)  —  {admm_result['label']}",
+        color=FG, fontsize=12)
+
+    col_data = [admm_result, baseline_result]
+    col_titles = ["ADMM (coordinated)", "PI only (non-coordinated)"]
+
+    for col, (res, title) in enumerate(zip(col_data, col_titles)):
+        ax_lux  = axes[0][col]
+        ax_duty = axes[1][col]
+        ax_lux.set_facecolor(PANEL)
+        ax_duty.set_facecolor(PANEL)
+        _style(ax_lux)
+        _style(ax_duty)
+
+        total_E = 0.0
+        sum_V   = 0.0
+        sum_F   = 0.0
+        n_nodes = 0
+
+        for i, nid in enumerate(range(1, N_NODES + 1)):
+            nd  = res['nodes'].get(nid, {})
+            d   = nd.get('stream', {})
+            col_c = PAL[i]
+
+            if d.get('t_lux') and d.get('lux'):
+                t0 = d['t_lux'][0]
+                t  = [x - t0 for x in d['t_lux']]
+                ax_lux.plot(t, d['lux'], color=col_c, lw=1.2,
+                            label=f"Node {nid}  occ={nd.get('occ',0)}  c={nd.get('cost',1)}")
+            L = nd.get('L', 0)
+            if L > 0:
+                ax_lux.axhline(L, color=col_c, lw=0.9, ls='--', alpha=0.5,
+                               label=f"L{nid}={L:.0f} lux")
+
+            if d.get('t_duty') and d.get('duty'):
+                t0 = d['t_duty'][0]
+                t  = [x - t0 for x in d['t_duty']]
+                ax_duty.plot(t, d['duty'], color=col_c, lw=1.2, label=f"Node {nid}")
+
+            total_E += nd.get('E', 0)
+            sum_V   += nd.get('V', 0)
+            sum_F   += nd.get('F', 0)
+            n_nodes += 1
+
+        mean_V = sum_V / max(n_nodes, 1)
+        mean_F = sum_F / max(n_nodes, 1)
+        summary = f"E={total_E:.4f} J\nV={mean_V:.4f} lux\nF={mean_F:.4f} /s"
+        ax_lux.text(0.97, 0.97, summary, transform=ax_lux.transAxes,
+                    fontsize=7.5, va='top', ha='right', color=FG,
+                    bbox=dict(facecolor='#2a2a3e', alpha=0.7, edgecolor=GRID, pad=3))
+
+        ax_lux.set_title(title, fontsize=10, color=FG)
+        ax_lux.set_ylabel("Illuminance [lux]" if col == 0 else "", color=FG)
+        ax_lux.set_ylim(bottom=0)
+        _legend(ax_lux)
+
+        ax_duty.set_ylabel("Duty Cycle" if col == 0 else "", color=FG)
+        ax_duty.set_xlabel("Time [s]", color=FG)
+        ax_duty.set_ylim(-0.05, 1.1)
+        _legend(ax_duty)
+
+    plt.tight_layout()
+    path = os.path.join(out_dir, "plot_comparison_coordinated_vs_baseline.png")
+    fig.savefig(path, dpi=150, bbox_inches='tight', facecolor=DARK)
+    plt.close(fig)
+    print(f"  Saved: {path}")
+
+
+def run_disturbance_test(disturber_nid: int, out_dir: str):
+    """
+    Disturbance rejection test.
+    Assumes all nodes are already in coordinated (ADMM) steady state.
+
+    Timeline:
+      0 – 5 s   : steady-state collection
+      5 – 11 s  : disturber duty forced to 0.8 (feedback off)
+      11 – 17 s : feedback restored on disturber, PI recovers
+    """
+    print("\n" + "=" * 60)
+    print(f"  DISTURBANCE REJECTION TEST  (disturber = Node {disturber_nid})")
+    print("=" * 60)
+
+    T_STEADY  = 5.0
+    T_DISTURB = 6.0
+    T_RECOVER = 6.0
+    t_disturb_rel = T_STEADY
+    t_restore_rel = T_STEADY + T_DISTURB
+
+    # Clear buffers and start streaming manually
+    for n in nodes:
+        n.lux_buf.clear()
+        n.duty_buf.clear()
+    for n in nodes:
+        if n.node_id:
+            n.write(f"s y {n.node_id}")
+            n.write(f"s u {n.node_id}")
+
+    # Phase 1: steady state
+    print(f"  Collecting {T_STEADY:.0f}s steady state…")
+    time.sleep(T_STEADY)
+
+    # Phase 2: apply disturbance (disable feedback → force duty)
+    print(f"  Disturbance ON — Node {disturber_nid} duty → 0.8")
+    send(disturber_nid, f"f {disturber_nid} 0")
+    time.sleep(0.05)
+    send(disturber_nid, f"u {disturber_nid} 0.8")
+    time.sleep(T_DISTURB)
+
+    # Phase 3: restore feedback
+    print(f"  Disturbance OFF — restoring feedback on Node {disturber_nid}")
+    send(disturber_nid, f"f {disturber_nid} 1")
+    time.sleep(T_RECOVER)
+
+    # Stop streaming
+    for n in nodes:
+        if n.node_id:
+            n.write(f"S y {n.node_id}")
+            n.write(f"S u {n.node_id}")
+    time.sleep(0.3)
+
+    # Read buffers
+    stream = {}
+    for n in nodes:
+        if n.node_id:
+            with n.lock:
+                stream[n.node_id] = {
+                    't_lux':  [x[0] for x in n.lux_buf],
+                    'lux':    [x[1] for x in n.lux_buf],
+                    't_duty': [x[0] for x in n.duty_buf],
+                    'duty':   [x[1] for x in n.duty_buf],
+                }
+
+    L_vals = {n.node_id: (n.query('L') or 0.0) for n in nodes if n.node_id}
+
+    # Plot
+    fig, axes = plt.subplots(2, 1, figsize=(13, 8), sharex=True)
+    fig.patch.set_facecolor(DARK)
+    fig.suptitle(
+        f"Disturbance Rejection — Node {disturber_nid} duty forced to 0.8 at t≈{t_disturb_rel:.0f}s",
+        color=FG, fontsize=12)
+
+    for ax in axes:
+        _style(ax)
+
+    for i, nid in enumerate(range(1, N_NODES + 1)):
+        d   = stream.get(nid, {})
+        col = PAL[i]
+        if d.get('t_lux') and d.get('lux'):
+            t0 = d['t_lux'][0]
+            t  = [x - t0 for x in d['t_lux']]
+            axes[0].plot(t, d['lux'], color=col, lw=1.2, label=f"Node {nid}")
+            L = L_vals.get(nid, 0.0)
+            if L > 0:
+                axes[0].axhline(L, color=col, lw=0.8, ls='--', alpha=0.5,
+                                label=f"L{nid}={L:.0f} lux")
+        if d.get('t_duty') and d.get('duty'):
+            t0 = d['t_duty'][0]
+            t  = [x - t0 for x in d['t_duty']]
+            axes[1].plot(t, d['duty'], color=col, lw=1.2, label=f"Node {nid}")
+
+    for ax in axes:
+        ax.axvline(t_disturb_rel, color=RED, lw=1.2, ls='--', alpha=0.8,
+                   label=f"disturbance on (t={t_disturb_rel:.0f}s)")
+        ax.axvline(t_restore_rel, color=ORG, lw=1.2, ls='--', alpha=0.8,
+                   label=f"disturbance off (t={t_restore_rel:.0f}s)")
+
+    axes[0].set_ylabel("Illuminance [lux]")
+    axes[0].set_title("LUX — dashed horizontal = lower bound L, dashed vertical = disturbance events",
+                      fontsize=9)
+    axes[0].set_ylim(bottom=0)
+    _legend(axes[0])
+
+    axes[1].set_ylabel("Duty Cycle")
+    axes[1].set_xlabel("Time [s]")
+    axes[1].set_title("Duty Cycles", fontsize=9)
+    axes[1].set_ylim(-0.05, 1.1)
+    _legend(axes[1])
+
+    plt.tight_layout()
+    path = os.path.join(out_dir, "plot_disturbance_rejection.png")
+    fig.savefig(path, dpi=150, bbox_inches='tight', facecolor=DARK)
+    plt.close(fig)
+    print(f"  Saved: {path}")
 
 
 def run_convergence_study(out_dir, results):
@@ -811,10 +1127,14 @@ def run_convergence_study(out_dir, results):
                 axes[1].plot(t, d['duty'],
                              color=PAL[i], lw=1.2, label=f'Node {nid}')
 
-        axes[0].axhline(20, color=RED, lw=0.9, ls='--', alpha=0.6, label='ref_high=20')
-        axes[0].axhline(10, color=ORG, lw=0.9, ls='--', alpha=0.6, label='ref_low=10')
+        for i, nid in enumerate([1, 2, 3]):
+            nd = sc['nodes'].get(nid, {})
+            L = nd.get('L', 0)
+            if L > 0:
+                axes[0].axhline(L, color=PAL[i], lw=0.9, ls='--', alpha=0.5,
+                                label=f"L{nid}={L:.0f} lux")
         axes[0].set_ylabel('Illuminance [lux]')
-        axes[0].set_title('LUX (dashed = lower bounds 10 / 20)', fontsize=9)
+        axes[0].set_title('LUX (dashed = lower bound L per node)', fontsize=9)
         axes[0].set_ylim(bottom=0)
         _legend(axes[0])
 
@@ -867,12 +1187,22 @@ if __name__ == "__main__":
 
     # ── 2. Wait for node IDs ────────────────────────────────────────────────
     print(f"\nWaiting for node IDs (up to {ID_TIMEOUT_S}s)…")
-    deadline = time.time() + ID_TIMEOUT_S
+    t0_id       = time.time()
+    deadline    = t0_id + ID_TIMEOUT_S
+    rebooted    = set()   # ports already sent a reboot
     while time.time() < deadline and not all(n.node_id for n in nodes):
-        # Use 'i' command to get local ID (bypasses hub_forward)
+        elapsed = time.time() - t0_id
         for n in nodes:
             if n.node_id is None and n.connected:
-                n.ser.write(b"\n") # clear partial commands
+                # After 15 s with no identity, send a soft reboot so the Pico
+                # prints its [BOOT] LUMINAIRE=N message fresh.
+                if elapsed > 15 and n.port not in rebooted:
+                    print(f"  [{n.port}] no response after 15 s — sending reboot…")
+                    n.ser.write(b"R\n")
+                    rebooted.add(n.port)
+                    time.sleep(0.5)   # let the Pico restart
+                    continue
+                n.ser.write(b"\n")   # clear any partial command in the firmware
                 time.sleep(0.1)
                 n.write("i")
         time.sleep(1)
@@ -900,10 +1230,17 @@ if __name__ == "__main__":
     print("  Triggering calibration...")
     for n in nodes:
         n.cal_done = False
-    
-    # Repeatedly kick calibration to ensure Node 1 catches it
+
+    # Calibration must be initiated from the lowest-numbered node so that
+    # the sequencing matches the firmware's expectation.  Fall back to
+    # whichever node was identified if node 1 is missing.
+    cal_initiator = node_by_id.get(1) or node_by_id.get(min(node_by_id))
+    if cal_initiator is None:
+        print("  ERROR: no node available to trigger calibration.")
+        sys.exit(1)
+
     for _ in range(5):
-        node_by_id[1].write("c")
+        cal_initiator.write("c")
         time.sleep(1.0)
     
     CAL_TIMEOUT_S = 180 
@@ -947,6 +1284,34 @@ if __name__ == "__main__":
     plot_metrics(results, out_dir)
     plot_timeseries(results, out_dir)
 
+    # ── 8. Coordinated vs non-coordinated comparison (back-to-back, same conditions)
+    # Both runs happen immediately after each other so physical conditions are
+    # identical.  Using a stale result from run_tests() would be unfair since
+    # ambient light and sensor temperature may have drifted during the full suite.
+    print("\nFresh ADMM run for coordinated vs baseline comparison…")
+    admm_fresh = run_single_admm(
+        {1: 2, 2: 2, 3: 2}, {1: 1, 2: 1, 3: 1}, "Occ(2,2,2) C=[1,1,1]")
+
+    print("\nRunning non-coordinated baseline (PI only, same scenario)…")
+    baseline_all_high = run_baseline({1: 2, 2: 2, 3: 2}, "PI-only Occ(2,2,2)")
+
+    plot_comparison(admm_fresh, baseline_all_high, out_dir)
+
+    # ── 9. Disturbance rejection test ──────────────────────────────────────
+    print("\nRunning disturbance rejection test…")
+    # Re-establish coordinated steady state before probing disturbance rejection
+    for nid in range(1, N_NODES + 1):
+        send(nid, f"o {nid} 2")
+    time.sleep(0.3)
+    for n in nodes:
+        n.admm_done = False
+    send(1, "T")
+    wait_admm(ADMM_WAIT_S)
+    time.sleep(3)
+
+    run_disturbance_test(disturber_nid=2, out_dir=out_dir)
+
+    # ── 10. Convergence study ───────────────────────────────────────────────
     run_convergence_study(out_dir, results)
     print(f"\n✓ Done. Plots saved to: {out_dir}")
     print("Files: plot_steady_state_occupancy.png  plot_cost_comparison.png"

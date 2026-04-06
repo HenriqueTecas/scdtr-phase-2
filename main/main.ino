@@ -222,6 +222,8 @@ void network_wakeup()
 
     while (n_other_nodes < N_NODES - 1)
     {
+        serial_command(); // Enable identity 'i' and other commands while waiting
+
         if (millis() - last_syn_ms >= 200)
         {
             can_send_sub(BROADCAST, MSG_WAKEUP, SUB_SYN);
@@ -672,6 +674,14 @@ void process_can_messages()
             case 'C':
                 val = energy_cost;
                 break;
+            case 'K':
+                extern float admm_primal_res;
+                val = admm_primal_res;
+                break;
+            case 'J':
+                extern float admm_dual_res;
+                val = admm_dual_res;
+                break;
             case 'o':
                 val = (float)pid.get_occupancy();
                 break;
@@ -761,47 +771,26 @@ void process_can_messages()
 
         case MSG_ADMM:
         {
-            if (frm.can_dlc >= 8 && frm.data[7] == ADMM_WIRE_MAGIC)
+            if (frm.can_dlc < 7)
             {
-                uint8_t iter = frm.data[0];
-                int16_t q1, q2, q3;
-                memcpy(&q1, frm.data + 1, sizeof(q1));
-                memcpy(&q2, frm.data + 3, sizeof(q2));
-                memcpy(&q3, frm.data + 5, sizeof(q3));
-                admm_receive(src, 1, iter, admm_wire_decode(q1));
-                admm_receive(src, 2, iter, admm_wire_decode(q2));
-                admm_receive(src, 3, iter, admm_wire_decode(q3));
-                break;
-            }
-
-            if (frm.can_dlc < 6)
-            {
-                Serial.printf("[ADMM RX DROP] legacy frame src=%d dlc=%d\n",
+                Serial.printf("[ADMM RX DROP] packed frame too short src=%d dlc=%d\n",
                               src, frm.can_dlc);
                 break;
             }
-            uint8_t comp = frm.data[0]; // component index j (1..N)
-            uint8_t iter = frm.data[1];
-            float val;
-            memcpy(&val, frm.data + 2, 4);
-            if (!admm_running)
-            {
-                Serial.printf("[ADMM RX DISCARD] admm_running=false src=%d iter=%d comp=%d val=%.4f stage=%d\n",
-                              src, iter, comp, val, (int)admm_stage);
-                break; // discard outside receive window
-            }
-            admm_receive(src, comp, iter, val);
+            uint8_t iter = frm.data[0];
+            int16_t q1, q2, q3;
+            memcpy(&q1, frm.data + 1, sizeof(q1));
+            memcpy(&q2, frm.data + 3, sizeof(q2));
+            memcpy(&q3, frm.data + 5, sizeof(q3));
+            admm_receive(src, 1, iter, admm_wire_decode(q1));
+            admm_receive(src, 2, iter, admm_wire_decode(q2));
+            admm_receive(src, 3, iter, admm_wire_decode(q3));
             break;
         }
 
         case MSG_CTRL:
             if (sub == SUB_ACK)
                 Serial.println("ack");
-            else if (sub == SUB_REBOOT)
-            {
-                delay(3000);
-                rp2040.reboot();
-            }
             else if (sub == SUB_ADMM_TRIGGER)
             {
                 admm_request(true);
@@ -914,13 +903,6 @@ void hub_forward(const char *cmd_str, uint8_t dest_node)
         msg.data[2] = (command == 's') ? 1 : 0;
         can_queue_tx(msg);
         Serial.println("ack");
-        return;
-    }
-    if (command == 'R')
-    {
-        can_send_sub(BROADCAST, MSG_CTRL, SUB_REBOOT);
-        delay(500);
-        rp2040.reboot();
         return;
     }
     Serial.println("err -> hub cannot forward this command");

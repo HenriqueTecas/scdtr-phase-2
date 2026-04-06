@@ -20,7 +20,7 @@ extern float sys_background;
 extern PID pid;
 
 // ── State ─────────────────────────────────────────────────────────────────────
-int ADMM_MAXITER = 100;
+int ADMM_MAXITER = 50;
 float admm_u[ADMM_N + 1] = {0};
 float admm_u_avg[ADMM_N + 1] = {0};
 float admm_lambda[ADMM_N + 1] = {0};
@@ -30,6 +30,9 @@ float admm_d_bg = 0;
 float admm_L = 0;
 float admm_n_sq = 0;
 float admm_m_sq = 0;
+float admm_primal_res = 0;
+float admm_dual_res = 0;
+
 float admm_recv[ADMM_N + 1][ADMM_N + 1] = {{0}};
 static bool admm_recv_seen[ADMM_N + 1][ADMM_N + 1] = {{false}};
 int admm_recv_count[ADMM_N + 1] = {0};
@@ -37,6 +40,8 @@ static float admm_recv_next[ADMM_N + 1][ADMM_N + 1] = {{0}};
 static bool admm_recv_next_seen[ADMM_N + 1][ADMM_N + 1] = {{false}};
 static int admm_recv_next_count[ADMM_N + 1] = {0};
 bool admm_running = false;
+
+static float admm_u_avg_prev[ADMM_N + 1] = {0};
 
 static void admm_seed_window(float buf[][ADMM_N + 1],
                              bool seen[][ADMM_N + 1],
@@ -97,6 +102,8 @@ static void admm_promote_next_window()
 // ─────────────────────────────────────────────────────────────────────────────
 void admm_init()
 {
+    admm_primal_res = 0;
+    admm_dual_res = 0;
 
     // k[j] = k_ij — coupling gain from node j's LED to THIS desk (slide 7).
     // Filled from the gain matrix measured during distributed calibration.
@@ -150,7 +157,7 @@ void admm_init()
     // the occupied node can correct within a few iterations.
     float u_ff = feedforward(L_raw);
     for (int j = 1; j <= ADMM_N; j++)
-        admm_lambda[j] = 0.0f; // Clear integrators to prevent windup carry-over
+        admm_lambda[j] = 0.0f;
     admm_u[LUMINAIRE]     = u_ff;
     admm_u_avg[LUMINAIRE] = u_ff;
     for (int j = 1; j <= ADMM_N; j++)
@@ -164,7 +171,7 @@ void admm_init()
 
     // Seed receive windows: own row uses u_ff; peer rows use 0.5 so a timeout
     // falls back to a neutral estimate rather than zero.
-    admm_seed_window(admm_recv, admm_recv_seen, admm_recv_count, 0.5f);
+    admm_seed_window(admm_recv,      admm_recv_seen,      admm_recv_count,      0.5f);
     admm_seed_window(admm_recv_next, admm_recv_next_seen, admm_recv_next_count, 0.5f);
     admm_recv[LUMINAIRE][LUMINAIRE]      = u_ff;
     admm_recv_next[LUMINAIRE][LUMINAIRE] = u_ff;
@@ -205,13 +212,6 @@ static float predicted_lux(const float u[])
     return lux;
 }
 
-static bool avg_hits_local_target(const float u[])
-{
-    if (admm_L <= 0.0f)
-        return true;
-    return predicted_lux(u) + ADMM_LUX_TOL >= admm_L;
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // QP objective — slide 10 simplified form
 //
@@ -238,6 +238,10 @@ void admm_start()
 {
     admm_iter = 0;
     admm_running = true;
+    admm_primal_res = 0;
+    admm_dual_res = 0;
+    for (int j = 1; j <= ADMM_N; j++)
+        admm_u_avg_prev[j] = admm_u_avg[j];
     admm_stage = AdmmStage::PRIMAL_UPDATE;
 }
 
@@ -310,20 +314,6 @@ bool admm_tick()
         for (int j = 1; j <= ADMM_N; j++)
             u_unc[j] = (1.0f / ADMM_RHO) * z_i[j];
 
-        // Clamp non-own duty estimates to [0,1].
-        // Each u[j] for j≠LUMINAIRE is an estimate of node j's physical duty cycle,
-        // which cannot leave [0,1]. Without clamping, after many iterations the dual
-        // variables λ drive z[j]/ρ to large negative values, making predicted_lux()
-        // artificially negative and causing ALL candidates (including C3 at own duty=1)
-        // to appear infeasible. The fix is to clamp peers before feasibility evaluation.
-        auto clamp_peers = [](float u[])
-        {
-            for (int j = 1; j <= ADMM_N; j++)
-                if (j != LUMINAIRE)
-                    u[j] = constrain(u[j], 0.0f, 1.0f);
-        };
-        clamp_peers(u_unc);
-
         if (feasible(u_unc))
         {
             for (int j = 1; j <= ADMM_N; j++)
@@ -337,7 +327,6 @@ bool admm_tick()
 
             auto try_cand = [&](float cand[])
             {
-                clamp_peers(cand);
                 if (!feasible(cand))
                     return;
                 float c = qp_cost(cand, z_i);
@@ -356,28 +345,6 @@ bool admm_tick()
                 for (int j = 1; j <= ADMM_N; j++)
                     u_c1[j] = (1.0f / ADMM_RHO) * z_i[j] - admm_k[j] * f;
                 try_cand(u_c1);
-
-                // C1b: peers clamped to [0,1], own duty set to minimum that still
-                // meets the illuminance constraint.  Needed when the C1 formula
-                // places a peer component above 1 (physically impossible); after
-                // clamping, illuminance drops below L and C1 is declared infeasible,
-                // forcing a wasteful fallback to C3 (own duty = 1).  C1b avoids this
-                // by fixing peers at their physical maximum and solving the 1-D
-                // problem for the minimum own duty.
-                {
-                    float cross = 0.0f;
-                    for (int j = 1; j <= ADMM_N; j++)
-                        if (j != LUMINAIRE)
-                            cross += admm_k[j] * constrain(u_c1[j], 0.0f, 1.0f);
-                    float min_own = (admm_k[LUMINAIRE] > 1e-6f)
-                                    ? (admm_L - admm_d_bg - cross) / admm_k[LUMINAIRE]
-                                    : 1.0f;
-                    float u_c1b[ADMM_N + 1];
-                    for (int j = 1; j <= ADMM_N; j++)
-                        u_c1b[j] = constrain(u_c1[j], 0.0f, 1.0f);
-                    u_c1b[LUMINAIRE] = constrain(min_own, 0.0f, 1.0f);
-                    try_cand(u_c1b);
-                }
             }
             {
                 float u_c2[ADMM_N + 1];
@@ -499,7 +466,7 @@ bool admm_tick()
             float sum = 0.0f;
             for (int i = 1; i <= ADMM_N; i++)
                 sum += admm_recv[i][j];
-            admm_u_avg[j] = sum / ADMM_N;
+            admm_u_avg[j] = constrain(sum / ADMM_N, 0.0f, 1.0f);
         }
 
         for (int j = 1; j <= ADMM_N; j++)
@@ -507,37 +474,28 @@ bool admm_tick()
 
         admm_iter++;
 
-        float res_sq = 0.0f;
+        float res_sq_primal = 0.0f;
+        float res_sq_dual = 0.0f;
         for (int j = 1; j <= ADMM_N; j++)
         {
-            float diff = admm_u[j] - admm_u_avg[j];
-            res_sq += diff * diff;
-        }
-        float avg_lux = predicted_lux(admm_u_avg);
-        bool avg_feasible = avg_hits_local_target(admm_u_avg);
+            float diff_p = admm_u[j] - admm_u_avg[j];
+            res_sq_primal += diff_p * diff_p;
 
-        // Two-tier stopping (matches the intent documented in admm.h):
-        //   Soft stop — ADMM_MAXITER reached AND solution is feasible.
-        //               Allows extra iterations if consensus hasn't yet met the
-        //               illuminance target at iter = ADMM_MAXITER.
-        //   Hard stop — ADMM_MAXITER_HARD reached unconditionally.
-        //               Safety cap when feasibility is never achieved.
-        //
-        // NOTE: primal-residual-based early stopping (converged flag) is
-        // intentionally omitted.  The residual u_i − ū can reach ~0 within
-        // a few iterations because each node's dual variable absorbs its cost
-        // offset in one step (λ → −c, making u_i = ū exactly), yet ū itself
-        // has not yet reached the LP optimum — unoccupied peer components are
-        // still elevated and cost-differentiated duties have not propagated.
-        // Using only the MAXITER / MAXITER_HARD thresholds avoids this false
-        // convergence while preserving the correct steady-state result.
-        bool do_stop = (avg_feasible && admm_iter >= ADMM_MAXITER) ||
-                       (admm_iter >= ADMM_MAXITER_HARD);
-        if (do_stop)
+            float diff_d = admm_u_avg[j] - admm_u_avg_prev[j];
+            res_sq_dual += diff_d * diff_d;
+
+            admm_u_avg_prev[j] = admm_u_avg[j];
+        }
+        admm_primal_res = sqrtf(res_sq_primal);
+        admm_dual_res = ADMM_RHO * sqrtf(res_sq_dual);
+
+        float avg_lux = predicted_lux(admm_u_avg);
+
+        // Fixed-budget stop: residuals are recorded for plotting only.
+        if (admm_iter >= ADMM_MAXITER)
         {
-            Serial.printf("[ADMM] done k=%d  u_ii=%.4f  avg_lux=%.2f%s\n",
-                          admm_iter, admm_u_avg[LUMINAIRE], avg_lux,
-                          admm_iter >= ADMM_MAXITER_HARD ? " (hard-cap)" : "");
+            Serial.printf("[ADMM] done k=%d  u_ii=%.4f  avg_lux=%.2f  fixed-cap\n",
+                          admm_iter, admm_u_avg[LUMINAIRE], avg_lux);
             admm_running = false;
             admm_stage = AdmmStage::DONE;
             return true;

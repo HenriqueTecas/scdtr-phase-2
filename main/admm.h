@@ -35,10 +35,7 @@
 
 // ── Tuning constants ──────────────────────────────────────────────────────────
 static constexpr float ADMM_RHO = 5.0f;            // ρ  — penalty parameter
-static constexpr float ADMM_EPS = 1e-4f;           // convergence threshold
-static constexpr float ADMM_LUX_TOL = 0.10f;       // acceptable averaged illuminance slack in lux
-extern int ADMM_MAXITER;                           // soft iteration budget once the averaged solution is usable
-static constexpr int ADMM_MAXITER_HARD = 150;      // absolute safety cap if consensus remains under target
+extern int ADMM_MAXITER;                           // fixed ADMM iteration budget
 static constexpr unsigned long ADMM_TIMEOUT = 150; // ms to wait for CAN peers (N msgs each)
 
 // ── ADMM state (1-indexed, matching LUMINAIRE convention) ─────────────────────
@@ -51,6 +48,9 @@ extern float admm_d_bg;               // d_i : background lux
 extern float admm_L;                  // L_i : illuminance lower bound
 extern float admm_n_sq;               // ‖kᵢ‖²
 extern float admm_m_sq;               // ‖kᵢ‖² − k_ii²
+
+extern float admm_primal_res;         // primal residual ‖u_i − ū‖
+extern float admm_dual_res;           // dual residual ρ‖ū^k − ū^{k-1}‖
 
 extern float admm_recv[ADMM_N + 1][ADMM_N + 1]; // [src][component]
 extern int admm_recv_count[ADMM_N + 1];         // msgs received per node
