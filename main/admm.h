@@ -52,6 +52,9 @@ extern float admm_L;                  // L_i : illuminance lower bound
 extern float admm_n_sq;               // ‖kᵢ‖²
 extern float admm_m_sq;               // ‖kᵢ‖² − k_ii²
 
+extern float admm_primal_res;         // primal residual ‖u_i − ū‖
+extern float admm_dual_res;           // dual residual ρ‖ū^k − ū^{k-1}‖
+
 extern float admm_recv[ADMM_N + 1][ADMM_N + 1]; // [src][component]
 extern int admm_recv_count[ADMM_N + 1];         // msgs received per node
 extern bool admm_running;                       // true while consensus is active
@@ -75,3 +78,4 @@ bool admm_tick();
 float admm_result();
 void admm_request(bool is_responder);
 void admm_receive(uint8_t src, uint8_t comp, uint8_t iter, float val);
+void admm_set_peer_converged(uint8_t src, bool converged);

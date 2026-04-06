@@ -130,9 +130,27 @@ class Node:
 # ── Serial reader threads ──────────────────────────────────────────────────────
 def reader_thread(node: Node):
     try:
-        node.ser = serial.Serial(node.port, BAUD, timeout=1)
-        time.sleep(2)
+        node.ser = serial.Serial(node.port, BAUD, timeout=0.2)
+        # Read for 2.5 s instead of sleeping blindly: this captures the
+        # [BOOT] LUMINAIRE=N line the Pico prints on serial open (a DTR
+        # toggle can trigger a reset).  reset_input_buffer() would erase it.
+        boot_deadline = time.time() + 2.5
+        while time.time() < boot_deadline:
+            try:
+                raw = node.ser.readline().decode(errors="ignore").strip()
+            except Exception:
+                break
+            if not raw:
+                continue
+            with node.lock:
+                node._lines.append(raw)
+                if node.node_id is None:
+                    m = re.search(r'\[BOOT\] LUMINAIRE=(\d+)', raw)
+                    if m:
+                        node.node_id = int(m.group(1))
+                        print(f"  [{node.port}] → Node {node.node_id}")
         node.ser.reset_input_buffer()
+        node.ser.timeout = 1  # normal blocking readline timeout
         node.connected = True
         print(f"  [{node.port}] connected")
 
@@ -1169,12 +1187,22 @@ if __name__ == "__main__":
 
     # ── 2. Wait for node IDs ────────────────────────────────────────────────
     print(f"\nWaiting for node IDs (up to {ID_TIMEOUT_S}s)…")
-    deadline = time.time() + ID_TIMEOUT_S
+    t0_id       = time.time()
+    deadline    = t0_id + ID_TIMEOUT_S
+    rebooted    = set()   # ports already sent a reboot
     while time.time() < deadline and not all(n.node_id for n in nodes):
-        # Use 'i' command to get local ID (bypasses hub_forward)
+        elapsed = time.time() - t0_id
         for n in nodes:
             if n.node_id is None and n.connected:
-                n.ser.write(b"\n") # clear partial commands
+                # After 15 s with no identity, send a soft reboot so the Pico
+                # prints its [BOOT] LUMINAIRE=N message fresh.
+                if elapsed > 15 and n.port not in rebooted:
+                    print(f"  [{n.port}] no response after 15 s — sending reboot…")
+                    n.ser.write(b"R\n")
+                    rebooted.add(n.port)
+                    time.sleep(0.5)   # let the Pico restart
+                    continue
+                n.ser.write(b"\n")   # clear any partial command in the firmware
                 time.sleep(0.1)
                 n.write("i")
         time.sleep(1)
@@ -1202,10 +1230,17 @@ if __name__ == "__main__":
     print("  Triggering calibration...")
     for n in nodes:
         n.cal_done = False
-    
-    # Repeatedly kick calibration to ensure Node 1 catches it
+
+    # Calibration must be initiated from the lowest-numbered node so that
+    # the sequencing matches the firmware's expectation.  Fall back to
+    # whichever node was identified if node 1 is missing.
+    cal_initiator = node_by_id.get(1) or node_by_id.get(min(node_by_id))
+    if cal_initiator is None:
+        print("  ERROR: no node available to trigger calibration.")
+        sys.exit(1)
+
     for _ in range(5):
-        node_by_id[1].write("c")
+        cal_initiator.write("c")
         time.sleep(1.0)
     
     CAL_TIMEOUT_S = 180 

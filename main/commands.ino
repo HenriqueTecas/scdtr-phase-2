@@ -26,6 +26,8 @@ extern float ref_high;    // Table 3: HIGH occupancy lower bound [LUX]
 extern float ref_low;     // Table 3: LOW  occupancy lower bound [LUX]
 extern float energy_cost; // Table 3: energy cost coefficient
 extern int ADMM_MAXITER;  // admm.cpp global; exposed for 'M' command
+extern float admm_primal_res; // admm.cpp
+extern float admm_dual_res;   // admm.cpp
 void admm_request(bool is_responder);
 
 enum class CalStage : uint8_t;
@@ -532,6 +534,16 @@ void commands(char *buffer, Print &out)
                 PRINTF(out, "C %d %.4f\n", LUMINAIRE, energy_cost);
             break;
 
+        case 'K':
+            if (LUMINAIRE == luminaire_index)
+                PRINTF(out, "K %d %.6f %.6f\n", LUMINAIRE, admm_primal_res, admm_dual_res);
+            break;
+
+        case 'J':
+            if (LUMINAIRE == luminaire_index)
+                PRINTF(out, "J %d %.6f\n", LUMINAIRE, admm_dual_res);
+            break;
+
         default:
             out.println("err: unknown get sub-command");
             break;
@@ -544,7 +556,8 @@ void commands(char *buffer, Print &out)
         out.println("Control:  r u f o a <i> <val>");
         out.println("Phase 2:  O <i> <lux>  HIGH bound | U <i> <lux>  LOW bound");
         out.println("          C <i> <val>  energy cost | R  restart");
-        out.println("Get:      g y/u/r/v/o/a/f/d/p/t/E/V/F/O/U/L/C <i>");
+        out.println("Get:      g y/u/r/v/o/a/f/d/p/t/E/V/F/O/U/L/C/K/J <i>");
+        out.println("          (K=primal res, J=dual res)");
         out.println("          g b y/u <i>  (hub/local only)");
         out.println("Calib:    c g | c s [n] | c b [v] | c m <v> | c ?");
         out.println("Tuning:   c p/i/B/t/w/f <i> <val>");

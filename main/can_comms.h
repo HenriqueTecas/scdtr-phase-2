@@ -57,7 +57,7 @@ inline void can_queue_tx(const struct can_frame &msg) {
 static constexpr float ADMM_WIRE_SCALE = 2048.0f;
 static constexpr float ADMM_WIRE_MIN = -16.0f;
 static constexpr float ADMM_WIRE_MAX = 15.9995f;
-static constexpr uint8_t ADMM_WIRE_MAGIC = 0xA5;
+static constexpr uint8_t ADMM_WIRE_MAGIC = 0x25; // low 7 bits
 
 inline int16_t admm_wire_encode(float value) {
     if (value < ADMM_WIRE_MIN)
@@ -102,7 +102,7 @@ inline void can_send_sub(uint8_t dest, uint8_t msg_type, uint8_t sub) {
     can_queue_tx(msg);
 }
 
-inline void can_send_admm(uint8_t dest, uint8_t iter, const float values[4]) {
+inline void can_send_admm(uint8_t dest, uint8_t iter, const float values[4], bool converged) {
     struct can_frame msg;
     msg.can_id  = MAKE_CAN_ID(MSG_ADMM, dest, LUMINAIRE);
     msg.can_dlc = 8;
@@ -114,6 +114,6 @@ inline void can_send_admm(uint8_t dest, uint8_t iter, const float values[4]) {
     memcpy(msg.data + 1, &q1, sizeof(q1));
     memcpy(msg.data + 3, &q2, sizeof(q2));
     memcpy(msg.data + 5, &q3, sizeof(q3));
-    msg.data[7] = ADMM_WIRE_MAGIC;
+    msg.data[7] = (converged ? 0x80 : 0x00) | ADMM_WIRE_MAGIC;
     can_queue_tx(msg);
 }

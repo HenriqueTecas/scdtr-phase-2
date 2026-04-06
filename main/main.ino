@@ -222,6 +222,8 @@ void network_wakeup()
 
     while (n_other_nodes < N_NODES - 1)
     {
+        serial_command(); // Enable identity 'i' and other commands while waiting
+
         if (millis() - last_syn_ms >= 200)
         {
             can_send_sub(BROADCAST, MSG_WAKEUP, SUB_SYN);
@@ -672,6 +674,14 @@ void process_can_messages()
             case 'C':
                 val = energy_cost;
                 break;
+            case 'K':
+                extern float admm_primal_res;
+                val = admm_primal_res;
+                break;
+            case 'J':
+                extern float admm_dual_res;
+                val = admm_dual_res;
+                break;
             case 'o':
                 val = (float)pid.get_occupancy();
                 break;
@@ -761,9 +771,10 @@ void process_can_messages()
 
         case MSG_ADMM:
         {
-            if (frm.can_dlc >= 8 && frm.data[7] == ADMM_WIRE_MAGIC)
+            if (frm.can_dlc >= 8 && (frm.data[7] & 0x7F) == ADMM_WIRE_MAGIC)
             {
                 uint8_t iter = frm.data[0];
+                bool peer_wants_stop = (frm.data[7] & 0x80);
                 int16_t q1, q2, q3;
                 memcpy(&q1, frm.data + 1, sizeof(q1));
                 memcpy(&q2, frm.data + 3, sizeof(q2));
@@ -771,6 +782,7 @@ void process_can_messages()
                 admm_receive(src, 1, iter, admm_wire_decode(q1));
                 admm_receive(src, 2, iter, admm_wire_decode(q2));
                 admm_receive(src, 3, iter, admm_wire_decode(q3));
+                admm_set_peer_converged(src, peer_wants_stop);
                 break;
             }
 
