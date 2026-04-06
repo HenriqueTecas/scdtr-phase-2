@@ -683,6 +683,60 @@ def plot_timeseries(results, out_dir):
 
 
 
+def run_single_admm(occs: dict, costs: dict, label: str) -> dict:
+    """
+    Run one fresh ADMM scenario and return results in the same format as run_tests().
+    Used to get a freshly-collected ADMM result for back-to-back comparison.
+    """
+    cal_params_local = {}
+    for n in nodes:
+        if n.node_id:
+            G, d = parse_cal_params(n)
+            cal_params_local[n.node_id] = (G, d)
+
+    for n in nodes:
+        n.admm_done = False
+
+    for nid in range(1, N_NODES + 1):
+        send(nid, f"C {nid} {costs[nid]}")
+    time.sleep(0.5)
+
+    # Apply occupancy — first 'o' on node 1 triggers a stale ADMM; drain it,
+    # then re-trigger with all occupancies set.  Same protocol as run_tests().
+    for nid in range(1, N_NODES + 1):
+        send(nid, f"o {nid} {occs[nid]}")
+    time.sleep(0.3)
+    wait_admm(ADMM_WAIT_S)
+    time.sleep(0.5)
+
+    for n in nodes:
+        n.admm_done = False
+    send(1, "T")
+    wait_admm(ADMM_WAIT_S)
+    time.sleep(4)   # extra PI settle
+
+    L_vals = {n.node_id: n.query('L') for n in nodes if n.node_id}
+    stream = collect(COLLECT_S)
+
+    result = {'label': label,
+              'occ':   tuple(occs[i]  for i in range(1, 4)),
+              'costs': tuple(costs[i] for i in range(1, 4)),
+              'nodes': {}}
+
+    for nid in range(1, N_NODES + 1):
+        d_ss = stream.get(nid, {'lux': [], 'duty': [], 't_lux': [], 't_duty': []})
+        lux_ss, duty_ss = steady_state_mean(d_ss)
+        G, d_bg = cal_params_local.get(nid, (1.0, 0.0))
+        L = L_vals.get(nid) or 0.0
+        E_s, V_s, F_s = compute_metrics(d_ss['lux'], d_ss['duty'], L, d_bg, G)
+        result['nodes'][nid] = {
+            'lux_ss': lux_ss, 'duty_ss': duty_ss,
+            'E': E_s, 'V': V_s, 'F': F_s, 'L': L,
+            'stream': d_ss, 'occ': occs[nid], 'cost': costs[nid],
+        }
+    return result
+
+
 def run_baseline(occs: dict, label: str) -> dict:
     """
     Non-coordinated control: PI only, reference set directly from occupancy.
@@ -692,9 +746,14 @@ def run_baseline(occs: dict, label: str) -> dict:
     REF_LOW  = 10.0
     SETTLE_S = 8.0
 
+    # Ensure feedback is on and seed integrators before setting the new reference.
+    # f <i> 1 calls apply_feedforward(r) in the firmware, which initialises the
+    # integrator at feedforward(r) so the PI starts from the right place rather
+    # than from the previous ADMM operating point.
     for nid in range(1, N_NODES + 1):
         ref = REF_HIGH if occs[nid] == 2 else (REF_LOW if occs[nid] == 1 else 0.0)
-        send(nid, f"r {nid} {ref}")
+        send(nid, f"r {nid} {ref}")   # set reference first so apply_feedforward uses it
+        send(nid, f"f {nid} 1")       # re-enable feedback + seed integrator
     time.sleep(SETTLE_S)
 
     L_vals = {n.node_id: n.query('L') for n in nodes if n.node_id}
@@ -1190,22 +1249,18 @@ if __name__ == "__main__":
     plot_metrics(results, out_dir)
     plot_timeseries(results, out_dir)
 
-    # ── 8. Non-coordinated baseline comparison ─────────────────────────────
-    print("\nRunning non-coordinated baseline for comparison…")
-    # Reset costs to uniform before baseline so the comparison is fair
-    for nid in range(1, N_NODES + 1):
-        send(nid, f"C {nid} 1")
-    time.sleep(0.3)
+    # ── 8. Coordinated vs non-coordinated comparison (back-to-back, same conditions)
+    # Both runs happen immediately after each other so physical conditions are
+    # identical.  Using a stale result from run_tests() would be unfair since
+    # ambient light and sensor temperature may have drifted during the full suite.
+    print("\nFresh ADMM run for coordinated vs baseline comparison…")
+    admm_fresh = run_single_admm(
+        {1: 2, 2: 2, 3: 2}, {1: 1, 2: 1, 3: 1}, "Occ(2,2,2) C=[1,1,1]")
 
+    print("\nRunning non-coordinated baseline (PI only, same scenario)…")
     baseline_all_high = run_baseline({1: 2, 2: 2, 3: 2}, "PI-only Occ(2,2,2)")
 
-    admm_all_high = next(
-        (r for r in results if r['label'] == "Occ(2,2,2) C=[1,1,1]"), None)
-
-    if admm_all_high:
-        plot_comparison(admm_all_high, baseline_all_high, out_dir)
-    else:
-        print("  [skip] plot_comparison — Occ(2,2,2) C=[1,1,1] result not found")
+    plot_comparison(admm_fresh, baseline_all_high, out_dir)
 
     # ── 9. Disturbance rejection test ──────────────────────────────────────
     print("\nRunning disturbance rejection test…")
