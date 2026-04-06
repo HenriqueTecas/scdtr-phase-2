@@ -791,11 +791,6 @@ void process_can_messages()
         case MSG_CTRL:
             if (sub == SUB_ACK)
                 Serial.println("ack");
-            else if (sub == SUB_REBOOT)
-            {
-                delay(3000);
-                rp2040.reboot();
-            }
             else if (sub == SUB_ADMM_TRIGGER)
             {
                 admm_request(true);
@@ -908,13 +903,6 @@ void hub_forward(const char *cmd_str, uint8_t dest_node)
         msg.data[2] = (command == 's') ? 1 : 0;
         can_queue_tx(msg);
         Serial.println("ack");
-        return;
-    }
-    if (command == 'R')
-    {
-        can_send_sub(BROADCAST, MSG_CTRL, SUB_REBOOT);
-        delay(500);
-        rp2040.reboot();
         return;
     }
     Serial.println("err -> hub cannot forward this command");

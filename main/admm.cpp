@@ -104,8 +104,6 @@ void admm_init()
 {
     admm_primal_res = 0;
     admm_dual_res = 0;
-    for (int j = 1; j <= ADMM_N; j++)
-        admm_u_avg_prev[j] = 0.0f;
 
     // k[j] = k_ij — coupling gain from node j's LED to THIS desk (slide 7).
     // Filled from the gain matrix measured during distributed calibration.
@@ -243,7 +241,7 @@ void admm_start()
     admm_primal_res = 0;
     admm_dual_res = 0;
     for (int j = 1; j <= ADMM_N; j++)
-        admm_u_avg_prev[j] = 0.0f;
+        admm_u_avg_prev[j] = admm_u_avg[j];
     admm_stage = AdmmStage::PRIMAL_UPDATE;
 }
 
@@ -496,8 +494,8 @@ bool admm_tick()
         // Fixed-budget stop: residuals are recorded for plotting only.
         if (admm_iter >= ADMM_MAXITER)
         {
-            Serial.printf("[ADMM] done k=%d  u_ii=%.4f  avg_lux=%.2f  fixed-cap (primal=%.5f dual=%.5f)\n",
-                          admm_iter, admm_u_avg[LUMINAIRE], avg_lux, admm_primal_res, admm_dual_res);
+            Serial.printf("[ADMM] done k=%d  u_ii=%.4f  avg_lux=%.2f  fixed-cap\n",
+                          admm_iter, admm_u_avg[LUMINAIRE], avg_lux);
             admm_running = false;
             admm_stage = AdmmStage::DONE;
             return true;

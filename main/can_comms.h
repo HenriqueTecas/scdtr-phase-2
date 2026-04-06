@@ -36,7 +36,6 @@
 #define SUB_CAL_DONE    0x04
 // MSG_CTRL
 #define SUB_ACK         0x01
-#define SUB_REBOOT      0x02
 #define SUB_ADMM_TRIGGER 0x05
 
 // ── Globals from main.ino ─────────────────────────────────────────────────────
