@@ -790,7 +790,7 @@ void process_can_messages()
 
         case MSG_CTRL:
             if (sub == SUB_ACK)
-                Serial.println("ack");
+                Serial.println("ack:remote");
             else if (sub == SUB_ADMM_TRIGGER)
             {
                 admm_request(true);
@@ -824,7 +824,7 @@ void hub_forward(const char *cmd_str, uint8_t dest_node)
         int idx;
         sscanf(cmd_str, "%c %d %f", &command, &idx, &val);
         can_send_float(dest_node, MSG_SET, 'r', val);
-        Serial.println("ack");
+        Serial.println("ack:forwarded");
         return;
     }
     if (command == 'u')
@@ -833,7 +833,7 @@ void hub_forward(const char *cmd_str, uint8_t dest_node)
         int idx;
         sscanf(cmd_str, "%c %d %f", &command, &idx, &val);
         can_send_float(dest_node, MSG_SET, 'u', val);
-        Serial.println("ack");
+        Serial.println("ack:forwarded");
         return;
     }
     if (command == 'o')
@@ -842,7 +842,7 @@ void hub_forward(const char *cmd_str, uint8_t dest_node)
         int idx;
         sscanf(cmd_str, "%c %d %f", &command, &idx, &val);
         can_send_byte(dest_node, MSG_SET, 'o', (uint8_t)val);
-        Serial.println("ack");
+        Serial.println("ack:forwarded");
         return;
     }
     if (command == 'f')
@@ -851,7 +851,7 @@ void hub_forward(const char *cmd_str, uint8_t dest_node)
         int idx;
         sscanf(cmd_str, "%c %d %f", &command, &idx, &val);
         can_send_byte(dest_node, MSG_SET, 'f', (uint8_t)val);
-        Serial.println("ack");
+        Serial.println("ack:forwarded");
         return;
     }
     if (command == 'a')
@@ -860,7 +860,7 @@ void hub_forward(const char *cmd_str, uint8_t dest_node)
         int idx;
         sscanf(cmd_str, "%c %d %f", &command, &idx, &val);
         can_send_byte(dest_node, MSG_SET, 'a', (uint8_t)val);
-        Serial.println("ack");
+        Serial.println("ack:forwarded");
         return;
     }
     if (command == 'O')
@@ -869,7 +869,7 @@ void hub_forward(const char *cmd_str, uint8_t dest_node)
         int idx;
         sscanf(cmd_str, "%c %d %f", &command, &idx, &val);
         can_send_float(dest_node, MSG_SET, 'O', val);
-        Serial.println("ack");
+        Serial.println("ack:forwarded");
         return;
     }
     if (command == 'U')
@@ -878,7 +878,7 @@ void hub_forward(const char *cmd_str, uint8_t dest_node)
         int idx;
         sscanf(cmd_str, "%c %d %f", &command, &idx, &val);
         can_send_float(dest_node, MSG_SET, 'U', val);
-        Serial.println("ack");
+        Serial.println("ack:forwarded");
         return;
     }
     if (command == 'C')
@@ -887,7 +887,7 @@ void hub_forward(const char *cmd_str, uint8_t dest_node)
         int idx;
         sscanf(cmd_str, "%c %d %f", &command, &idx, &val);
         can_send_float(dest_node, MSG_SET, 'C', val);
-        Serial.println("ack");
+        Serial.println("ack:forwarded");
         return;
     }
     if (command == 's' || command == 'S')
@@ -902,7 +902,7 @@ void hub_forward(const char *cmd_str, uint8_t dest_node)
         msg.data[1] = (uint8_t)var;
         msg.data[2] = (command == 's') ? 1 : 0;
         can_queue_tx(msg);
-        Serial.println("ack");
+        Serial.println("ack:forwarded");
         return;
     }
     Serial.println("err -> hub cannot forward this command");
