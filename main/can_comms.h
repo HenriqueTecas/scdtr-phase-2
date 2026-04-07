@@ -22,6 +22,7 @@
 #define MSG_SET     0x2
 #define MSG_GET     0x3
 #define MSG_REPLY   0x4
+#define MSG_STREAM  0x5
 #define MSG_ADMM    0x6
 #define MSG_CTRL    0x7
 
@@ -37,6 +38,7 @@
 // MSG_CTRL
 #define SUB_ACK         0x01
 #define SUB_ADMM_TRIGGER 0x05
+#define SUB_RESTART     0x06
 
 // ── Globals from main.ino ─────────────────────────────────────────────────────
 extern MCP2515  can0;
@@ -95,6 +97,15 @@ inline void can_send_sub(uint8_t dest, uint8_t msg_type, uint8_t sub) {
     msg.can_id  = MAKE_CAN_ID(msg_type, dest, LUMINAIRE);
     msg.can_dlc = 1;
     msg.data[0] = sub;
+    can_queue_tx(msg);
+}
+
+inline void can_send_stream(uint8_t dest, char var, float value) {
+    struct can_frame msg;
+    msg.can_id  = MAKE_CAN_ID(MSG_STREAM, dest, LUMINAIRE);
+    msg.can_dlc = 5;
+    msg.data[0] = (uint8_t)var;
+    memcpy(msg.data + 1, &value, 4);
     can_queue_tx(msg);
 }
 

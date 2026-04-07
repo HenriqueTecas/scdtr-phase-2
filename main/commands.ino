@@ -57,7 +57,7 @@ void commands(char *buffer, Print &out)
     // ── Hub forwarding ──────────────────────────────────────────────────────
     // Parse the luminaire index from any command that has one
     // If it's not ours, forward the whole buffer over CAN and return
-    if (command != 'h' && command != 'c' && command != 'i' && command != 'T')
+    if (command != 'h' && command != 'c' && command != 'T' && command != 'R')
     {
         int idx = -1;
         char *p = buffer + 1;
@@ -76,15 +76,18 @@ void commands(char *buffer, Print &out)
     switch (command)
     {
 
-    // ── i : Local identity (bypasses hub forwarding) ────────────────────────
-    case 'i':
-        PRINTF(out, "i %d\n", LUMINAIRE);
-        break;
-
     // ── T : Start ADMM consensus across all nodes ────────────────────────────
     case 'T':
         admm_request(false);
         out.println("ack");
+        break;
+
+    // ── R : Restart all nodes and re-run startup calibration ───────────────────
+    case 'R':
+        can_send_byte(BROADCAST, MSG_CTRL, SUB_RESTART, (uint8_t)LUMINAIRE);
+        out.println("ack");
+        delay(100); // let Core 1 put the broadcast restart frame on the CAN bus
+        rp2040.reboot();
         break;
 
     // ── u <i> <val> : Set duty cycle (open-loop) ─────────────────────────────
@@ -533,6 +536,7 @@ void commands(char *buffer, Print &out)
         out.println("Phase 2:  O <i> <lux>  HIGH bound | U <i> <lux>  LOW bound");
         out.println("          C <i> <val>  energy cost");
         out.println("ADMM:     T  trigger consensus");
+        out.println("System:   R  restart all nodes and recalibrate");
         out.println("Get:      g y/u/r/v/o/a/f/d/p/t/E/V/F/O/U/L/C/K/J <i>");
         out.println("          (K=primal res, J=dual res)");
         out.println("          g b y/u <i>  (hub/local only)");

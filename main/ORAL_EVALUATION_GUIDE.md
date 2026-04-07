@@ -619,12 +619,7 @@ Hub forwarding:
 
 - Commands with a target node ID are inspected before local handling.
 - If the target ID is not this node, `hub_forward(buffer, dest)` is called.
-- Commands `h`, `c`, `i`, and `T` are not forwarded by this generic logic.
-
-Identity:
-
-- `i` prints `i <LUMINAIRE>`.
-- It bypasses forwarding and helps verify which physical board is connected.
+- Commands `h`, `c`, and `T` are not forwarded by this generic logic.
 
 ADMM:
 
@@ -1670,7 +1665,7 @@ Command function:
 
 Control command blocks:
 
-- Handles identity, ADMM trigger, duty, reference, occupancy, anti-windup, feedback, streaming, and phase 2 parameters.
+- Handles ADMM trigger, duty, reference, occupancy, anti-windup, feedback, streaming, and phase 2 parameters.
 
 Calibration/tuning command block:
 

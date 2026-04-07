@@ -72,6 +72,7 @@ float duty_cycle = 0.0f;
 float serial_duty_cycle = 0.0f;
 
 int stream_y = 0, stream_u = 0;
+uint8_t can_stream_y_dest = 0, can_stream_u_dest = 0, can_stream_j_dest = 0;
 int buffer_y = 0, buffer_u = 0, buffer_read_size = 0, buffer_read_counter = 0;
 CircularBuffer<6000> last_min_buf;
 
@@ -222,7 +223,7 @@ void network_wakeup()
 
     while (n_other_nodes < N_NODES - 1)
     {
-        serial_command(); // Enable identity 'i' and other commands while waiting
+        serial_command(); // Allow commands while waiting for peers
 
         if (millis() - last_syn_ms >= 200)
         {
@@ -613,11 +614,26 @@ void process_can_messages()
                 char var = (char)frm.data[1];
                 int on_off = (int)frm.data[2];
                 if (var == 'y')
-                    stream_y = on_off;
+                {
+                    if (on_off)
+                        can_stream_y_dest = src;
+                    else if (can_stream_y_dest == src)
+                        can_stream_y_dest = 0;
+                }
                 else if (var == 'u')
-                    stream_u = on_off;
+                {
+                    if (on_off)
+                        can_stream_u_dest = src;
+                    else if (can_stream_u_dest == src)
+                        can_stream_u_dest = 0;
+                }
                 else if (var == 'j')
-                    stream_j = on_off;
+                {
+                    if (on_off)
+                        can_stream_j_dest = src;
+                    else if (can_stream_j_dest == src)
+                        can_stream_j_dest = 0;
+                }
                 can_send_byte(src, MSG_CTRL, SUB_ACK, (uint8_t)LUMINAIRE);
                 break;
             }
@@ -708,6 +724,25 @@ void process_can_messages()
             break;
         }
 
+        case MSG_STREAM:
+        {
+            if (frm.can_dlc < 5)
+            {
+                Serial.printf("[STREAM RX DROP] frame too short src=%d dlc=%d\n",
+                              src, frm.can_dlc);
+                break;
+            }
+            char var = (char)frm.data[0];
+            float val;
+            memcpy(&val, frm.data + 1, 4);
+            unsigned long ts_ms = millis();
+            if (var == 'j')
+                Serial.printf("s %c %d %.2f %lu\n", var, src, val, ts_ms);
+            else
+                Serial.printf("s %c %d %.4f %lu\n", var, src, val, ts_ms);
+            break;
+        }
+
         case MSG_CAL:
         {
             // Robust Barrier: any calibration message triggers a reset if finished
@@ -794,6 +829,12 @@ void process_can_messages()
             else if (sub == SUB_ADMM_TRIGGER)
             {
                 admm_request(true);
+            }
+            else if (sub == SUB_RESTART)
+            {
+                Serial.println("[CTRL] restart");
+                delay(50);
+                rp2040.reboot();
             }
             break;
 
@@ -1065,6 +1106,12 @@ void loop()
             Serial.printf("s u %d %.4f %lu\n", LUMINAIRE, duty_cycle, ts_ms);
         if (stream_j)
             Serial.printf("s j %d %.2f %lu\n", LUMINAIRE, jitter_us, ts_ms);
+        if (can_stream_y_dest)
+            can_send_stream(can_stream_y_dest, 'y', lux_value);
+        if (can_stream_u_dest)
+            can_send_stream(can_stream_u_dest, 'u', duty_cycle);
+        if (can_stream_j_dest)
+            can_send_stream(can_stream_j_dest, 'j', jitter_us);
     }
 
     serial_command();
