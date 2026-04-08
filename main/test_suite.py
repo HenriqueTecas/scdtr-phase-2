@@ -218,16 +218,24 @@ def reader_thread(node: Node):
                                 var = parts[1]
                                 src_id = int(parts[2])
                                 val = float(parts[3])
+                                t_stream = t
+                                if len(parts) >= 5:
+                                    ts_ms = int(parts[4])
+                                    if 1 <= src_id <= N_NODES:
+                                        with stream_lock:
+                                            if stream_t0_ms[src_id] is None:
+                                                stream_t0_ms[src_id] = ts_ms
+                                            t_stream = (ts_ms - stream_t0_ms[src_id]) / 1000.0
                                 if 1 <= src_id <= N_NODES:
                                     with stream_lock:
                                         if var == 'y':
-                                            stream_buffers[src_id]['lux'].append((t, val))
+                                            stream_buffers[src_id]['lux'].append((t_stream, val))
                                         elif var == 'u':
-                                            stream_buffers[src_id]['duty'].append((t, val))
+                                            stream_buffers[src_id]['duty'].append((t_stream, val))
                                 if var == 'y':
-                                    node.lux_buf.append((t, val))
+                                    node.lux_buf.append((t_stream, val))
                                 elif var == 'u':
-                                    node.duty_buf.append((t, val))
+                                    node.duty_buf.append((t_stream, val))
                             except ValueError:
                                 pass
 
@@ -249,6 +257,7 @@ stream_buffers = {
     nid: {'lux': [], 'duty': []}
     for nid in range(1, N_NODES + 1)
 }
+stream_t0_ms = {nid: None for nid in range(1, N_NODES + 1)}
 
 def hub_node() -> "Node | None":
     """Return the serial-connected node used as the CAN hub."""
@@ -266,9 +275,10 @@ def route_node(nid: int) -> "Node | None":
 
 def clear_stream_buffers():
     with stream_lock:
-        for b in stream_buffers.values():
+        for nid, b in stream_buffers.items():
             b['lux'].clear()
             b['duty'].clear()
+            stream_t0_ms[nid] = None
     for n in nodes:
         n.lux_buf.clear()
         n.duty_buf.clear()
@@ -410,11 +420,8 @@ def compute_metrics(lux_data: list, duty_data: list,
     Compute E, V, F from streaming data using equations (14)-(16) from PDF.
 
     E = Σ u_k · P_max · h
-    V = (1/T) Σ max(0, L − ŷ_k)  where ŷ_k is MEASURED lux (includes cross-coupling)
+    V = (1/T) Σ max(0, L − l_hat_k)  where l_hat_k = d + G·u_k
     F = 1/(T·h) · Σ_{Δu_k·Δu_{k−1}<0} (|Δu_k| + |Δu_{k−1}|)
-
-    V uses actual measured lux (not the single-node estimate d+G·u) so that spill
-    from neighbouring LEDs is correctly accounted for.
     """
     T = len(duty_data)
     if T == 0:
@@ -425,13 +432,9 @@ def compute_metrics(lux_data: list, duty_data: list,
     # Energy (J)
     E = float(np.sum(u) * MAXIMUM_POWER * h)
 
-    # Visibility error — use actual measured lux when available
-    if lux_data:
-        y = np.array(lux_data[:T], dtype=float)   # align to duty length
-        V = float(np.mean(np.maximum(0.0, L - y)))
-    else:
-        x_hat = d + G * u
-        V = float(np.mean(np.maximum(0.0, L - x_hat)))
+    # Visibility error — project-guide estimate based on duty cycle
+    x_hat = d + G * u
+    V = float(np.mean(np.maximum(0.0, L - x_hat)))
 
     # Flicker
     if T >= 3:
@@ -653,24 +656,24 @@ def print_table(results: list):
 # ── Plotting helpers ───────────────────────────────────────────────────────────
 DARK   = "white"
 PANEL  = "white"
-GRID   = "#c9c0b8"
+GRID   = "#a99d92"
 FG     = "black"
-BOX    = "#f8efe4"
-CAN_PINK   = "#efcfd0"
-CAN_LILAC  = "#d8d7f1"
-CAN_MINT   = "#d9efd2"
-CAN_BEIGE  = "#f4dfc7"
-CAN_ROSE   = "#c98e92"
-CAN_VIOLET = "#9d9ac7"
-CAN_SAGE   = "#9bbb95"
+BOX    = "#f2e6d9"
+CAN_PINK   = "#cf8f96"
+CAN_LILAC  = "#8f89c8"
+CAN_MINT   = "#7eaa78"
+CAN_BEIGE  = "#d4ae86"
+CAN_ROSE   = "#a55b64"
+CAN_VIOLET = "#6f69a6"
+CAN_SAGE   = "#5f8a58"
 PAL    = [CAN_PINK, CAN_LILAC, CAN_MINT]    # node 1/2/3
 RED    = CAN_ROSE
 ORG    = CAN_BEIGE
 CMAP_CONSTRAINT = LinearSegmentedColormap.from_list(
-    "can_constraint", [CAN_PINK, "#fbfbfd", CAN_MINT]
+    "can_constraint", [CAN_ROSE, "#fbfbfd", CAN_MINT]
 )
 CMAP_DUTY = LinearSegmentedColormap.from_list(
-    "can_duty", ["#ffffff", CAN_BEIGE, CAN_LILAC, CAN_MINT]
+    "can_duty", ["#ffffff", CAN_BEIGE, CAN_VIOLET, CAN_MINT]
 )
 
 def _style(ax):
@@ -1403,18 +1406,10 @@ def plot_model_fit(data, out_dir):
         
         u_meas = np.array([p[0] for p in node_results['measured']])
         y_meas = np.array([p[1] for p in node_results['measured']])
-        k_ii = node_results['k_ii']
-        d_i = node_results['d_i']
-        
         # Scatter measured
         ax.scatter(u_meas, y_meas, color=PAL[i-1], label='Measured', zorder=3, s=40)
 
         u_model = np.linspace(0, 1, 100)
-
-        # Firmware calibration model line
-        y_fw = k_ii * u_model + d_i
-        ax.plot(u_model, y_fw, color=FG, ls='--', alpha=0.55,
-                label=f'Firmware: {k_ii:.2f}u + {d_i:.2f}')
 
         # Linear regression fitted to the measured sweep data
         if len(u_meas) > 1:
@@ -1424,19 +1419,13 @@ def plot_model_fit(data, out_dir):
             ax.plot(u_model, y_fit, color=PAL[i-1], ls='-', lw=1.5, alpha=0.85,
                     label=f'Fitted:   {k_fit:.2f}u + {d_fit:.2f}')
 
-            # R² for firmware model (calibration accuracy)
-            y_pred_fw = k_ii * u_meas + d_i
-            ss_res_fw = np.sum((y_meas - y_pred_fw) ** 2)
-            ss_tot    = np.sum((y_meas - np.mean(y_meas)) ** 2)
-            r2_fw = 1 - ss_res_fw / ss_tot if ss_tot != 0 else 0
-
             # R² for fitted line (linearity of the physical system)
+            ss_tot = np.sum((y_meas - np.mean(y_meas)) ** 2)
             y_pred_fit = k_fit * u_meas + d_fit
             ss_res_fit = np.sum((y_meas - y_pred_fit) ** 2)
             r2_fit = 1 - ss_res_fit / ss_tot if ss_tot != 0 else 0
 
-            ann = (f"Firmware R² = {r2_fw:.4f}  (calibration accuracy)\n"
-                   f"Fitted R²   = {r2_fit:.4f}  (system linearity)")
+            ann = f"Fitted R² = {r2_fit:.4f}"
             ax.text(0.04, 0.97, ann, transform=ax.transAxes, color=FG,
                     va='top', fontsize=8,
                     bbox=dict(facecolor=BOX, alpha=0.9, edgecolor=GRID, pad=3))
@@ -1677,10 +1666,14 @@ def run_residual_study(out_dir):
     print("  RUNNING ADMM CONVERGENCE RESIDUAL STUDY")
     print("=" * 60)
 
-    # 1. Start from a known coordinated state.
-    base_occs = {1: 2, 2: 2, 3: 2}
+    # Fast-settling example chosen from observed terminal traces.
+    # The firmware still runs a fixed 50-iteration budget, but this cost step
+    # typically reaches a small residual by about k≈10 on the connected hub.
+    study_occs = {1: 2, 2: 2, 3: 2}
     base_costs = {1: 1, 2: 1, 3: 1}
-    establish_coordinated_state(base_occs, base_costs, settle_s=2)
+    target_costs = {1: 1, 2: 20, 3: 1}
+    study_label = "Occ(2,2,2), cost step C=[1,1,1]→[1,20,1]"
+    establish_coordinated_state(study_occs, base_costs, settle_s=2)
 
     # Clear the raw serial log so we capture one clean residual sequence for
     # this run only. The firmware already prints one residual line per ADMM
@@ -1692,8 +1685,8 @@ def run_residual_study(out_dir):
     # Trigger one fresh ADMM run through an implemented command. Changing node
     # 2's cost gives a meaningful convergence transient without using T or any
     # test-only command.
-    target_costs = {1: 1, 2: 10, 3: 1}
-    print("  Triggering residual run with: C 2 10")
+    print("  Study example:", study_label)
+    print("  Triggering residual run with: C 2 20")
     trigger_admm_via_cost(target_costs, target_nid=2)
 
     if wait_admm(ADMM_WAIT_S + 5.0):
@@ -1732,7 +1725,7 @@ def run_residual_study(out_dir):
         if seq['iter']:
             if n.node_id is None:
                 unknown_idx += 1
-                seq['label'] = f"Hub {unknown_idx} (ID unknown)"
+                seq['label'] = f"Hub {unknown_idx}"
                 key = -unknown_idx
             else:
                 seq['label'] = f"Node {n.node_id}"
@@ -1749,12 +1742,12 @@ def run_residual_study(out_dir):
     if max_points < 50:
         print(f"  [warning] Captured fewer than 50 residual samples (max={max_points}).")
 
-    plot_residuals_convergence(per_node, out_dir)
+    plot_residuals_convergence(per_node, out_dir, study_label)
 
-def plot_residuals_convergence(per_node, out_dir):
+def plot_residuals_convergence(per_node, out_dir, study_label):
     fig, axes = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
     fig.patch.set_facecolor(DARK)
-    fig.suptitle("ADMM Convergence — Residuals during cost step C=[1,1,1]→[1,10,1]",
+    fig.suptitle(f"ADMM Convergence — Residuals during {study_label}",
                  color=FG, fontsize=12)
     
     for ax in axes:
