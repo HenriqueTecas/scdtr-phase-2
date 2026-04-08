@@ -11,7 +11,9 @@ Produces:
   • plot_steady_state_occupancy.png  — lux & duty vs occupancy config
   • plot_cost_comparison.png         — duty & energy vs cost vector
   • plot_metrics.png                 — E / V / F across all scenarios
-  • plot_ts_<scenario>.png           — time-series for selected tests
+  • constraint_satisfaction_heatmap.png
+  • duty_allocation_heatmap.png
+  • residuals_convergence.png        — ADMM residuals vs iteration
 
 Usage:
     python test_suite.py                                       # auto-detect ports
@@ -28,6 +30,7 @@ import serial.tools.list_ports
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap
 
 # ── Tuneable parameters ────────────────────────────────────────────────────────
 BAUD           = 115200
@@ -80,16 +83,17 @@ class Node:
         self._t0       = time.time()
 
     # ── Serial helpers ─────────────────────────────────────────────────────
-    def write(self, cmd: str):
+    def write(self, cmd: str, pause_s: float = 0.06):
         if self.ser and self.ser.is_open:
             self.ser.write((cmd.strip() + "\n").encode())
-            time.sleep(0.06)
+            if pause_s > 0:
+                time.sleep(pause_s)
 
     def flush(self):
         with self.lock:
             self._lines.clear()
 
-    def wait_line(self, pattern: str, timeout=5.0) -> "str | None":
+    def wait_line(self, pattern: str, timeout=5.0, poll_s: float = 0.05) -> "str | None":
         """Return first matching line or None after timeout."""
         pat = re.compile(pattern)
         deadline = time.time() + timeout
@@ -98,7 +102,7 @@ class Node:
                 for line in self._lines:
                     if pat.search(line):
                         return line
-            time.sleep(0.05)
+            time.sleep(poll_s)
         return None
 
     def last_match(self, pattern: str) -> "str | None":
@@ -160,7 +164,7 @@ def reader_thread(node: Node):
                 continue
             with node.lock:
                 node._lines.append(raw)
-                if raw.startswith(("[BOOT]", "[WAKEUP]", "[RX] WAKEUP", "[CAL]", "[ADMM]", "[CTRL]")):
+                if raw.startswith(("[BOOT]", "[WAKEUP]", "[RX] WAKEUP", "[CAL]", "[ADMM]", "[ADMM RES]", "[CTRL]")):
                     print(f"  [{node.port}] {raw}")
                 if node.node_id is None:
                     m = re.search(r'\[BOOT\] LUMINAIRE=(\d+)', raw)
@@ -186,7 +190,7 @@ def reader_thread(node: Node):
                 with node.lock:
                     node._lines.append(raw)
 
-                    if raw.startswith(("[BOOT]", "[WAKEUP]", "[RX] WAKEUP", "[CAL]", "[ADMM]", "[CTRL]")):
+                    if raw.startswith(("[BOOT]", "[WAKEUP]", "[RX] WAKEUP", "[CAL]", "[ADMM]", "[ADMM RES]", "[CTRL]")):
                         print(f"  [{node.port}] {raw}")
 
                     # ── Node ID from boot message ───────────────────────────
@@ -291,22 +295,23 @@ def stop_streams():
         send(nid, f"S y {nid}")
         send(nid, f"S u {nid}")
 
-def send(nid: int, cmd: str):
+def send(nid: int, cmd: str, pause_s: float = 0.06):
     """Send command to node nid (hub-forward if needed)."""
     n = route_node(nid)
     if n:
-        n.write(cmd)
+        n.write(cmd, pause_s=pause_s)
     else:
         print(f"  [warn] no connected hub available for command: {cmd}")
 
-def query_node(nid: int, var: str, timeout=4.0) -> "float | None":
+def query_node(nid: int, var: str, timeout=4.0,
+               pause_s: float = 0.06, poll_s: float = 0.05) -> "float | None":
     """Query any node through direct serial if present, otherwise through hub CAN forwarding."""
     n = route_node(nid)
     if n is None:
         return None
     n.flush()
-    n.write(f"g {var} {nid}")
-    line = n.wait_line(rf"^{var} {nid}\b", timeout=timeout)
+    n.write(f"g {var} {nid}", pause_s=pause_s)
+    line = n.wait_line(rf"^{var} {nid}\b", timeout=timeout, poll_s=poll_s)
     if line:
         try:
             return float(line.split()[2])
@@ -314,13 +319,14 @@ def query_node(nid: int, var: str, timeout=4.0) -> "float | None":
             pass
     return None
 
-def query_str_node(nid: int, var: str, timeout=4.0) -> "str | None":
+def query_str_node(nid: int, var: str, timeout=4.0,
+                   pause_s: float = 0.06, poll_s: float = 0.05) -> "str | None":
     n = route_node(nid)
     if n is None:
         return None
     n.flush()
-    n.write(f"g {var} {nid}")
-    return n.wait_line(rf"^{var} {nid}\b", timeout=timeout)
+    n.write(f"g {var} {nid}", pause_s=pause_s)
+    return n.wait_line(rf"^{var} {nid}\b", timeout=timeout, poll_s=poll_s)
 
 def send_reboot_to_ports(ports: list[str]):
     """Send the firmware R command, then close serial so Windows can re-enumerate."""
@@ -645,20 +651,34 @@ def print_table(results: list):
         print("─"*W)
 
 # ── Plotting helpers ───────────────────────────────────────────────────────────
-DARK   = "#1e1e2e"
-PANEL  = "#13131f"
-GRID   = "#444466"
-FG     = "#cdd6f4"
-PAL    = ["#89dceb", "#a6e3a1", "#f9e2af"]    # node 1/2/3
-RED    = "#f38ba8"
-ORG    = "#fab387"
+DARK   = "white"
+PANEL  = "white"
+GRID   = "#c9c0b8"
+FG     = "black"
+BOX    = "#f8efe4"
+CAN_PINK   = "#efcfd0"
+CAN_LILAC  = "#d8d7f1"
+CAN_MINT   = "#d9efd2"
+CAN_BEIGE  = "#f4dfc7"
+CAN_ROSE   = "#c98e92"
+CAN_VIOLET = "#9d9ac7"
+CAN_SAGE   = "#9bbb95"
+PAL    = [CAN_PINK, CAN_LILAC, CAN_MINT]    # node 1/2/3
+RED    = CAN_ROSE
+ORG    = CAN_BEIGE
+CMAP_CONSTRAINT = LinearSegmentedColormap.from_list(
+    "can_constraint", [CAN_PINK, "#fbfbfd", CAN_MINT]
+)
+CMAP_DUTY = LinearSegmentedColormap.from_list(
+    "can_duty", ["#ffffff", CAN_BEIGE, CAN_LILAC, CAN_MINT]
+)
 
 def _style(ax):
     ax.set_facecolor(PANEL)
     ax.tick_params(colors=FG, labelsize=8)
     for sp in ax.spines.values():
         sp.set_edgecolor(GRID)
-    ax.grid(True, alpha=0.18, color=GRID)
+    ax.grid(True, alpha=0.45, color=GRID)
     ax.xaxis.label.set_color(FG)
     ax.yaxis.label.set_color(FG)
     ax.title.set_color(FG)
@@ -670,7 +690,10 @@ def _bar_group(ax, x, w, results, metric, node_ids=(1,2,3)):
                color=PAL[i], alpha=0.85, edgecolor=GRID, linewidth=0.5)
 
 def _legend(ax):
-    ax.legend(facecolor='#2a2a3e', labelcolor=FG, fontsize=8)
+    leg = ax.legend(facecolor='white', edgecolor=GRID, fontsize=8)
+    if leg:
+        for txt in leg.get_texts():
+            txt.set_color(FG)
 
 # ── Plot 1: Steady-state lux & duty vs occupancy (uniform costs) ───────────────
 def plot_occupancy(results, out_dir):
@@ -702,8 +725,8 @@ def plot_occupancy(results, out_dir):
         _legend(ax)
 
     # Reference lines on lux plot
-    axes[0].axhline(20, color=RED, lw=1.2, ls='--', alpha=0.7, label='ref_high=20')
-    axes[0].axhline(10, color=ORG, lw=1.2, ls='--', alpha=0.7, label='ref_low=10')
+    axes[0].axhline(20, color=CAN_ROSE, lw=1.2, ls='--', alpha=0.8, label='ref_high=20')
+    axes[0].axhline(10, color=CAN_BEIGE, lw=1.2, ls='--', alpha=0.9, label='ref_low=10')
     _legend(axes[0])
 
     plt.tight_layout()
@@ -740,7 +763,7 @@ def plot_costs(results, out_dir):
         ax.set_title(title, fontsize=10)
         _legend(ax)
 
-    axes[1].axhline(20, color=RED, lw=1, ls='--', alpha=0.6, label='L=20')
+    axes[1].axhline(20, color=CAN_ROSE, lw=1, ls='--', alpha=0.7, label='L=20')
     _legend(axes[1])
 
     plt.tight_layout()
@@ -1001,7 +1024,7 @@ def plot_comparison(admm_result: dict, baseline_result: dict, out_dir: str):
         summary = f"E={total_E:.4f} J\nV={mean_V:.4f} lux\nF={mean_F:.4f} /s"
         ax_lux.text(0.97, 0.97, summary, transform=ax_lux.transAxes,
                     fontsize=7.5, va='top', ha='right', color=FG,
-                    bbox=dict(facecolor='#2a2a3e', alpha=0.7, edgecolor=GRID, pad=3))
+                    bbox=dict(facecolor=BOX, alpha=0.9, edgecolor=GRID, pad=3))
 
         ax_lux.set_title(title, fontsize=10, color=FG)
         ax_lux.set_ylabel("Illuminance [lux]" if col == 0 else "", color=FG)
@@ -1190,7 +1213,7 @@ def run_convergence_study(out_dir, results):
     y_v = [r['visibility_error'] for r in convergence_results]
     y_e = [r['energy'] for r in convergence_results]
     
-    color = '#f38ba8' # red
+    color = CAN_ROSE
     ax1.set_xlabel('ADMM Iterations', color=FG)
     ax1.set_ylabel('Total Visibility Error [lux]', color=color)
     ax1.plot(x, y_v, 'o-', color=color, lw=2, label='Visibility Error')
@@ -1198,7 +1221,7 @@ def run_convergence_study(out_dir, results):
     ax1.grid(True, color=GRID, alpha=0.3)
     
     ax2 = ax1.twinx()
-    color = '#89dceb' # sky
+    color = CAN_VIOLET
     ax2.set_ylabel('Total Energy [J]', color=color)
     ax2.plot(x, y_e, 's--', color=color, lw=1.5, alpha=0.7, label='Energy')
     ax2.tick_params(axis='y', labelcolor=color)
@@ -1416,7 +1439,7 @@ def plot_model_fit(data, out_dir):
                    f"Fitted R²   = {r2_fit:.4f}  (system linearity)")
             ax.text(0.04, 0.97, ann, transform=ax.transAxes, color=FG,
                     va='top', fontsize=8,
-                    bbox=dict(facecolor=DARK, alpha=0.6, edgecolor=GRID, pad=3))
+                    bbox=dict(facecolor=BOX, alpha=0.9, edgecolor=GRID, pad=3))
         
         ax.set_title(f"Node {i}", color=FG)
         ax.set_xlabel("Duty Cycle", color=FG)
@@ -1443,31 +1466,43 @@ def plot_constraint_satisfaction_heatmap(results, out_dir):
     
     data_matrix = np.array(data_matrix)
     
-    fig, ax = plt.subplots(figsize=(10, 8))
-    fig.patch.set_facecolor(DARK)
-    ax.set_facecolor(PANEL)
+    fig, ax = plt.subplots(figsize=(10.5, 8), facecolor="white")
+    ax.set_facecolor("white")
     
     # diverging colormap centered at 0
     v_ext = max(abs(data_matrix.min()), abs(data_matrix.max()), 0.1)
-    im = ax.imshow(data_matrix, cmap='RdYlGn', aspect='auto', vmin=-v_ext, vmax=v_ext)
+    im = ax.imshow(
+        data_matrix,
+        cmap=CMAP_CONSTRAINT,
+        aspect='auto',
+        vmin=-v_ext,
+        vmax=v_ext,
+        interpolation='nearest',
+    )
     
     # Annotate
     for i in range(len(scenarios)):
         for j in range(N_NODES):
-            ax.text(j, i, f"{data_matrix[i, j]:.1f}", ha="center", va="center", color="black", fontsize=9)
+            ax.text(j, i, f"{data_matrix[i, j]:.1f}",
+                    ha="center", va="center", color="black", fontsize=9)
 
     ax.set_xticks(np.arange(N_NODES))
-    ax.set_xticklabels([f"Node {i+1}" for i in range(N_NODES)], color=FG)
+    ax.set_xticklabels([f"Node {i+1}" for i in range(N_NODES)], color="black")
     ax.set_yticks(np.arange(len(scenarios)))
-    ax.set_yticklabels(scenarios, color=FG, fontsize=8)
+    ax.set_yticklabels(scenarios, color="black", fontsize=8)
+    ax.tick_params(colors="black")
+    for sp in ax.spines.values():
+        sp.set_edgecolor(GRID)
     
-    ax.set_title("Constraint Satisfaction — lux_ss minus lower bound L [lux]", color=FG, pad=20)
+    ax.set_title("Constraint Satisfaction — lux_ss minus lower bound L [lux]",
+                 color="black", pad=20)
     cbar = plt.colorbar(im, ax=ax)
-    cbar.ax.tick_params(colors=FG)
+    cbar.ax.tick_params(colors="black")
+    cbar.outline.set_edgecolor(GRID)
     
     plt.tight_layout()
     path = os.path.join(out_dir, "constraint_satisfaction_heatmap.png")
-    fig.savefig(path, dpi=150, bbox_inches='tight', facecolor=DARK)
+    fig.savefig(path, dpi=150, bbox_inches='tight', facecolor="white")
     plt.close(fig)
     print(f"  Saved: {path}")
 
@@ -1483,30 +1518,41 @@ def plot_duty_allocation_heatmap(results, out_dir):
     
     data_matrix = np.array(data_matrix)
     
-    fig, ax = plt.subplots(figsize=(10, 8))
-    fig.patch.set_facecolor(DARK)
-    ax.set_facecolor(PANEL)
+    fig, ax = plt.subplots(figsize=(10.5, 8), facecolor="white")
+    ax.set_facecolor("white")
     
-    im = ax.imshow(data_matrix, cmap='viridis', aspect='auto', vmin=0, vmax=1)
+    im = ax.imshow(
+        data_matrix,
+        cmap=CMAP_DUTY,
+        aspect='auto',
+        vmin=0,
+        vmax=1,
+        interpolation='nearest',
+    )
     
     # Annotate
     for i in range(len(scenarios)):
         for j in range(N_NODES):
-            text_col = "white" if data_matrix[i,j] < 0.5 else "black"
-            ax.text(j, i, f"{data_matrix[i, j]:.3f}", ha="center", va="center", color=text_col, fontsize=9)
+            text_col = "black" if data_matrix[i, j] < 0.6 else "white"
+            ax.text(j, i, f"{data_matrix[i, j]:.3f}",
+                    ha="center", va="center", color=text_col, fontsize=9)
 
     ax.set_xticks(np.arange(N_NODES))
-    ax.set_xticklabels([f"Node {i+1}" for i in range(N_NODES)], color=FG)
+    ax.set_xticklabels([f"Node {i+1}" for i in range(N_NODES)], color="black")
     ax.set_yticks(np.arange(len(scenarios)))
-    ax.set_yticklabels(scenarios, color=FG, fontsize=8)
+    ax.set_yticklabels(scenarios, color="black", fontsize=8)
+    ax.tick_params(colors="black")
+    for sp in ax.spines.values():
+        sp.set_edgecolor(GRID)
     
-    ax.set_title("Steady-State Duty Allocation per Scenario", color=FG, pad=20)
+    ax.set_title("Steady-State Duty Allocation per Scenario", color="black", pad=20)
     cbar = plt.colorbar(im, ax=ax)
-    cbar.ax.tick_params(colors=FG)
+    cbar.ax.tick_params(colors="black")
+    cbar.outline.set_edgecolor(GRID)
     
     plt.tight_layout()
     path = os.path.join(out_dir, "duty_allocation_heatmap.png")
-    fig.savefig(path, dpi=150, bbox_inches='tight', facecolor=DARK)
+    fig.savefig(path, dpi=150, bbox_inches='tight', facecolor="white")
     plt.close(fig)
     print(f"  Saved: {path}")
 
@@ -1608,7 +1654,7 @@ def run_disturbance_test_improved(disturber_nid: int, out_dir: str):
 
     rec_text = "Recovery Times (error < 0.5 lux):\n" + "\n".join([f"Node {nid}: {t:.2f}s" for nid, t in recovery_times.items()])
     axes[0].text(0.98, 0.05, rec_text, transform=axes[0].transAxes, color=FG, fontsize=9, ha='right', va='bottom', 
-                 bbox=dict(facecolor='#2a2a3e', alpha=0.7, edgecolor=GRID))
+                 bbox=dict(facecolor=BOX, alpha=0.9, edgecolor=GRID))
 
     axes[0].set_ylabel("Visibility Error [lux] — max(0, L - y)")
     axes[0].set_title("Constraint Violation Over Time", fontsize=10, color=FG)
@@ -1636,124 +1682,135 @@ def run_residual_study(out_dir):
     base_costs = {1: 1, 2: 1, 3: 1}
     establish_coordinated_state(base_occs, base_costs, settle_s=2)
 
-    # 2. Trigger one fresh ADMM run through an implemented command. Changing
-    # node 2's cost gives a meaningful convergence transient without using T or
-    # any test-only command.
-    target_costs = {1: 1, 2: 10, 3: 1}
+    # Clear the raw serial log so we capture one clean residual sequence for
+    # this run only. The firmware already prints one residual line per ADMM
+    # iteration, which is more accurate than polling K/J manually.
     for n in nodes:
+        n.flush()
         n.admm_done = False
+
+    # Trigger one fresh ADMM run through an implemented command. Changing node
+    # 2's cost gives a meaningful convergence transient without using T or any
+    # test-only command.
+    target_costs = {1: 1, 2: 10, 3: 1}
     print("  Triggering residual run with: C 2 10")
     trigger_admm_via_cost(target_costs, target_nid=2)
 
-    # 3. Poll residuals until ADMM completes or timeout. Firmware exposes the
-    # latest residuals as g K <i> and g J <i>; it does not expose the iteration
-    # counter, so the x-axis is sample order during the ADMM run.
-    data = []
-    start_time = time.time()
-    deadline = start_time + ADMM_WAIT_S + 5.0
-    query_timeout = 0.35
-
-    # Track last values to deduplicate
-    last_res = {nid: (None, None) for nid in range(1, N_NODES+1)}
-
-    print("  Polling residuals through g K / g J...")
-    while time.time() < deadline:
-        sample = {'time': time.time() - start_time}
-        any_new = False
-
-        for nid in range(1, N_NODES + 1):
-            K = query_node(nid, 'K', timeout=query_timeout)
-            J = query_node(nid, 'J', timeout=query_timeout)
-
-            if K is not None and J is not None:
-                if (K, J) != last_res[nid]:
-                    any_new = True
-                    last_res[nid] = (K, J)
-
-                sample[f'K{nid}'] = K
-                sample[f'J{nid}'] = J
-
-        if any_new:
-            data.append(sample)
-            print(f"    Sample {len(data)}: K1={sample.get('K1',0):.4f} J1={sample.get('J1',0):.4f}", end="\r")
-
-        if any(n.admm_done for n in nodes):
-            print("\n  ADMM signaled completion.")
-            break
-
-        time.sleep(0.05)
+    if wait_admm(ADMM_WAIT_S + 5.0):
+        print("  ADMM signaled completion.")
     else:
-        print(f"\n  Polling timed out after {ADMM_WAIT_S + 5.0:.0f}s.")
+        print(f"  [warning] Residual run timed out after {ADMM_WAIT_S + 5.0:.0f}s.")
+    time.sleep(0.3)
 
-    if not data:
+    residual_pat = re.compile(
+        r"\[ADMM RES\]\s+iter=(\d+)\s+K=([-\d.eE+]+)\s+J=([-\d.eE+]+)"
+    )
+    per_node = {}
+    unknown_idx = 0
+    for n in nodes:
+        if not n.connected:
+            continue
+        with n.lock:
+            raw_lines = list(n._lines)
+
+        seq = {'iter': [], 'K': [], 'J': []}
+        for line in raw_lines:
+            m = residual_pat.search(line)
+            if not m:
+                continue
+            it = int(m.group(1))
+            k_val = float(m.group(2))
+            j_val = float(m.group(3))
+            if seq['iter'] and it == seq['iter'][-1]:
+                seq['K'][-1] = k_val
+                seq['J'][-1] = j_val
+            else:
+                seq['iter'].append(it)
+                seq['K'].append(k_val)
+                seq['J'].append(j_val)
+
+        if seq['iter']:
+            if n.node_id is None:
+                unknown_idx += 1
+                seq['label'] = f"Hub {unknown_idx} (ID unknown)"
+                key = -unknown_idx
+            else:
+                seq['label'] = f"Node {n.node_id}"
+                key = n.node_id
+            per_node[key] = seq
+            print(f"  {seq['label']}: captured {len(seq['iter'])} residual samples "
+                  f"(k={seq['iter'][0]}..{seq['iter'][-1]})")
+
+    if not per_node:
         print("  [skip] plot_residuals_convergence — no data collected")
         return
 
-    # Deduplicate and align into iteration indices
-    # Since nodes might be slightly out of sync in iteration count, 
-    # we'll just use the per-node distinct sequences.
-    per_node_K = {nid: [] for nid in range(1, N_NODES + 1)}
-    per_node_J = {nid: [] for nid in range(1, N_NODES + 1)}
-    
-    for s in data:
-        for nid in range(1, N_NODES + 1):
-            k_val = s.get(f'K{nid}')
-            j_val = s.get(f'J{nid}')
-            if k_val is not None:
-                if not per_node_K[nid] or k_val != per_node_K[nid][-1]:
-                    per_node_K[nid].append(k_val)
-                    per_node_J[nid].append(j_val)
+    max_points = max(len(seq['iter']) for seq in per_node.values())
+    if max_points < 50:
+        print(f"  [warning] Captured fewer than 50 residual samples (max={max_points}).")
 
-    non_empty_counts = [len(v) for v in per_node_K.values() if v]
-    if not non_empty_counts:
-        print("  [skip] plot_residuals_convergence — no residual sequences collected")
-        return
-    if max(non_empty_counts) < 3:
-        print(f"  [warning] Few distinct residual points collected (max={max(non_empty_counts)}). Plotting anyway.")
+    plot_residuals_convergence(per_node, out_dir)
 
-    plot_residuals_convergence(per_node_K, per_node_J, out_dir)
-
-def plot_residuals_convergence(per_node_K, per_node_J, out_dir):
+def plot_residuals_convergence(per_node, out_dir):
     fig, axes = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
     fig.patch.set_facecolor(DARK)
-    fig.suptitle("ADMM Convergence — Residuals for Occ(2,2,2), cost step C=[1,1,1]→[1,10,1]", color=FG, fontsize=12)
+    fig.suptitle("ADMM Convergence — Residuals during cost step C=[1,1,1]→[1,10,1]",
+                 color=FG, fontsize=12)
     
     for ax in axes:
         _style(ax)
         ax.set_yscale('log')
+
+    max_iter = 0
         
     # Top: Primal Residual
-    for nid in range(1, N_NODES + 1):
-        y_raw = per_node_K[nid]
-        if not y_raw:
+    for idx, key in enumerate(sorted(per_node)):
+        seq = per_node[key]
+        x_raw = seq['iter']
+        y_raw = seq['K']
+        if not x_raw or not y_raw:
             continue
+        x = np.array(x_raw, dtype=int)
         y = np.maximum(np.array(y_raw, dtype=float), 1e-6)
-        x = np.arange(len(y))
-        col = PAL[nid-1]
-        axes[0].plot(x, y, color=col, lw=1.5, marker='o', markersize=3, label=f"Node {nid}")
-        if len(y) > 0:
+        col = PAL[idx % len(PAL)]
+        label = seq.get('label', f"Node {key}")
+        axes[0].plot(x, y, color=col, lw=1.5, marker='o', markersize=3, label=label)
+        if len(y) > 1:
             axes[0].axhline(y[-1], color=col, ls='--', alpha=0.4)
+        max_iter = max(max_iter, int(x[-1]))
             
     axes[0].set_ylabel(r"Primal Residual $\|x_i - \bar{u}\|$")
     axes[0].set_title("Primal Residual Convergence", fontsize=10, color=FG)
     _legend(axes[0])
     
     # Bottom: Dual Residual
-    for nid in range(1, N_NODES + 1):
-        y_raw = per_node_J[nid]
-        if not y_raw:
+    for idx, key in enumerate(sorted(per_node)):
+        seq = per_node[key]
+        x_raw = seq['iter']
+        y_raw = seq['J']
+        if not x_raw or not y_raw:
             continue
+        x = np.array(x_raw, dtype=int)
         y = np.maximum(np.array(y_raw, dtype=float), 1e-6)
-        x = np.arange(len(y))
-        col = PAL[nid-1]
-        axes[1].plot(x, y, color=col, lw=1.5, marker='s', markersize=3, label=f"Node {nid}")
-        if len(y) > 0:
+        col = PAL[idx % len(PAL)]
+        label = seq.get('label', f"Node {key}")
+        axes[1].plot(x, y, color=col, lw=1.5, marker='s', markersize=3, label=label)
+        if len(y) > 1:
             axes[1].axhline(y[-1], color=col, ls='--', alpha=0.4)
+        max_iter = max(max_iter, int(x[-1]))
             
     axes[1].set_ylabel(r"Dual Residual $\|\rho(\bar{u}^k - \bar{u}^{k-1})\|$")
-    axes[1].set_xlabel("Residual sample during ADMM run")
+    axes[1].set_xlabel("ADMM Iteration k")
     axes[1].set_title("Dual Residual Convergence", fontsize=10, color=FG)
     _legend(axes[1])
+
+    if max_iter > 0:
+        tick_step = 5 if max_iter <= 60 else 10
+        ticks = list(range(1, max_iter + 1, tick_step))
+        if ticks[-1] != max_iter:
+            ticks.append(max_iter)
+        axes[1].set_xticks(ticks)
+        axes[1].set_xlim(1, max_iter)
     
     plt.tight_layout()
     path = os.path.join(out_dir, "residuals_convergence.png")
@@ -1783,8 +1840,8 @@ def plot_metrics_comparison(admm_results, baseline_results, sc_labels, out_dir):
         "Note: ADMM minimises weighted cost (Σ cᵢ·uᵢ), not raw energy",
         color=FG, fontsize=11)
 
-    ADMM_C = "#89dceb"   # sky
-    PI_C   = "#f9e2af"   # yellow
+    ADMM_C = CAN_LILAC
+    PI_C   = CAN_BEIGE
 
     def _weighted_cost(result):
         return sum(
@@ -1847,9 +1904,9 @@ def plot_metrics_comparison(admm_results, baseline_results, sc_labels, out_dir):
                     pct = (bv - av) / bv * 100
                     ax.annotate(f'−{pct:.0f}%',
                                 xy=(xi - w / 2, av), xytext=(xi, av * 1.18),
-                                ha='center', fontsize=8, color="#a6e3a1",
+                                ha='center', fontsize=8, color=CAN_SAGE,
                                 fontweight='bold',
-                                arrowprops=dict(arrowstyle='->', color="#a6e3a1",
+                                arrowprops=dict(arrowstyle='->', color=CAN_SAGE,
                                                 lw=0.8))
 
         ax.set_xticks(x)
@@ -2061,7 +2118,7 @@ if __name__ == "__main__":
             if any(k in (p.description or "").lower()
                       or k in (p.hwid or "").lower()
                    for k in ["pico", "rp2040", "2e8a", "ttyacm"])
-        ])[:N_NODES]
+        ])[:1]
 
     if not ports:
         print("ERROR: No Pico ports detected.")
@@ -2168,36 +2225,17 @@ if __name__ == "__main__":
     plot_occupancy(results, out_dir)
     plot_costs(results, out_dir)
     plot_metrics(results, out_dir)
-    plot_timeseries(results, out_dir)
-
-    # ── 8. Coordinated vs non-coordinated comparison (back-to-back, same conditions)
-    # Both runs happen immediately after each other so physical conditions are
-    # identical.  Using a stale result from run_tests() would be unfair since
-    # ambient light and sensor temperature may have drifted during the full suite.
-    # Asymmetric costs: node 2 is cheapest (c=1), nodes 1 and 3 are expensive (c=5).
-    # ADMM will load-shift work to node 2, reducing total energy.
-    # PI-only cannot do this — each node controls its own LED independently and
-    # reaches the same 20 lux target without awareness of peer costs.
-    print("\nFresh ADMM run for coordinated vs baseline comparison…")
-    admm_fresh = run_single_admm(
-        {1: 2, 2: 2, 3: 2}, {1: 5, 2: 1, 3: 5}, "Occ(2,2,2) C=[5,1,5]")
-
-    print("\nRunning non-coordinated baseline (PI only, same scenario)…")
-    baseline_all_high = run_baseline({1: 2, 2: 2, 3: 2}, "PI-only Occ(2,2,2)")
-
-    plot_comparison(admm_fresh, baseline_all_high, out_dir)
-
-    # ── 9. Disturbance rejection test ──────────────────────────────────────
+    # ── 8. Disturbance rejection test ──────────────────────────────────────
     print("\nRunning disturbance rejection test…")
     # Re-establish coordinated steady state before probing disturbance rejection.
     establish_coordinated_state(
         {1: 2, 2: 2, 3: 2}, {1: 1, 2: 1, 3: 1}, settle_s=3)
     run_disturbance_test(disturber_nid=2, out_dir=out_dir)
 
-    # ── 10. Convergence study ───────────────────────────────────────────────
+    # ── 9. Convergence study ────────────────────────────────────────────────
     run_convergence_study(out_dir, results)
 
-    # ── 11. New Plots (Phase 2) ────────────────────────────────────────────
+    # ── 10. New Plots (Phase 2) ────────────────────────────────────────────
     print("\n" + "━"*62)
     print("  Generating Additional Phase 2 Plots")
     print("━"*62)
@@ -2220,15 +2258,15 @@ if __name__ == "__main__":
     # Plot 5: ADMM Residual Convergence Study
     run_residual_study(out_dir)
 
-    # ── 12. Priority 1: E/V/F bar chart — ADMM vs PI-only ────────────────────
+    # ── 11. Priority 1: E/V/F bar chart — ADMM vs PI-only ────────────────────
     run_metrics_comparison(out_dir)
 
-    # ── 13. Priority 4: Occupancy change transient ────────────────────────────
+    # ── 12. Priority 4: Occupancy change transient ────────────────────────────
     run_occupancy_transient(out_dir)
 
     print(f"\n✓ Done. All plots saved to: {out_dir}")
     print("Files: plot_steady_state_occupancy.png  plot_cost_comparison.png"
-          "  plot_metrics.png  plot_ts_*.png  model_fit.png"
+          "  plot_metrics.png  model_fit.png"
           "  constraint_satisfaction_heatmap.png  duty_allocation_heatmap.png"
           "  disturbance_rejection_improved.png  residuals_convergence.png"
           "  plot_metrics_admm_vs_baseline.png  plot_occupancy_transient.png")

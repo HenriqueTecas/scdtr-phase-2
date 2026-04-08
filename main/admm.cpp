@@ -488,6 +488,8 @@ bool admm_tick()
         }
         admm_primal_res = sqrtf(res_sq_primal);
         admm_dual_res = ADMM_RHO * sqrtf(res_sq_dual);
+        Serial.printf("[ADMM RES] iter=%d K=%.6f J=%.6f\n",
+                      admm_iter, admm_primal_res, admm_dual_res);
 
         float avg_lux = predicted_lux(admm_u_avg);
 

@@ -37,8 +37,8 @@ public:
             b = 1.0f;
             break;
         case 3:
-            kp = 0.028f; // TODO: replace with node 3 tuned kp
-            ki = 0.155f; // TODO: replace with node 3 tuned ki
+            kp = 0.035f; // TODO: replace with node 3 tuned kp
+            ki = 0.180f; // TODO: replace with node 3 tuned ki
             kt = 5.0f;
             b = 1.0f;
             break;
