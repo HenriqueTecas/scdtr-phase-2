@@ -554,9 +554,8 @@ void process_can_messages()
                 r = (mode == 2) ? ref_high : (mode == 1) ? ref_low
                                                          : 0.0f;
                 flicker_holdoff = FLICKER_EXCLUDE_SAMPLES;
-                // Do not start ADMM here — the hub will send ADMM_TRIGGER
-                // separately so all nodes start consensus together.
                 can_send_byte(src, MSG_CTRL, SUB_ACK, (uint8_t)LUMINAIRE);
+                admm_request(false);
                 break;
             }
             case 'u':
@@ -604,9 +603,8 @@ void process_can_messages()
                 float val;
                 memcpy(&val, frm.data + 1, 4);
                 energy_cost = val;
-                // Do not start ADMM here — the hub will send ADMM_TRIGGER
-                // separately so all nodes start consensus together.
                 can_send_byte(src, MSG_CTRL, SUB_ACK, (uint8_t)LUMINAIRE);
+                admm_request(false);
                 break;
             }
             case 's':

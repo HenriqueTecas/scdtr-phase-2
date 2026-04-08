@@ -221,6 +221,7 @@ void commands(char *buffer, Print &out)
         if (LUMINAIRE == luminaire_index)
         {
             energy_cost = value;
+            admm_request(false);
             out.println("ack");
         }
         break;
