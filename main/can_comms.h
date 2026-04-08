@@ -39,6 +39,8 @@
 #define SUB_ACK         0x01
 #define SUB_ADMM_TRIGGER 0x05
 #define SUB_RESTART     0x06
+#define SUB_PING        0x07
+#define SUB_PONG        0x08
 
 // ── Globals from main.ino ─────────────────────────────────────────────────────
 extern MCP2515  can0;

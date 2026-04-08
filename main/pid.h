@@ -14,37 +14,27 @@ public:
 
     void init(int LUMINAIRE)
     {
-        // ── Per-luminaire tuning ───────────────────────────────────────────────
-        // Each node has a different static gain k_ii (measured during distributed
-        // calibration) so their open-loop gains differ. The PI gains are tuned
-        // individually in Part 1 — load the correct set here.
-        //
-        // TODO: replace placeholder values with your actual Part 1 results.
-        // The switch uses LUMINAIRE index (1/2/3) set during boot from UID_TABLE.
-        // If a new board is added, add a case here and to UID_TABLE in main.ino.
         switch (LUMINAIRE)
         {
         case 1:
-            kp = 0.028f; // TODO: replace with node 1 tuned kp
-            ki = 0.155f; // TODO: replace with node 1 tuned ki
+            kp = 0.028f;
+            ki = 0.155f;
             kt = 5.0f;
             b = 1.0f;
             break;
         case 2:
-            kp = 0.028f; // TODO: replace with node 2 tuned kp
-            ki = 0.155f; // TODO: replace with node 2 tuned ki
+            kp = 0.028f;
+            ki = 0.155f;
             kt = 5.0f;
             b = 1.0f;
             break;
         case 3:
-            kp = 0.035f; // TODO: replace with node 3 tuned kp
-            ki = 0.180f; // TODO: replace with node 3 tuned ki
+            kp = 0.035f;
+            ki = 0.180f;
             kt = 5.0f;
             b = 1.0f;
             break;
         default:
-            // Unknown luminaire index — fall back to safe conservative gains.
-            // This should never happen if UID_TABLE is filled correctly.
             kp = 0.020f;
             ki = 0.100f;
             kt = 5.0f;

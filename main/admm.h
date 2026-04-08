@@ -1,32 +1,4 @@
 #pragma once
-// ─── admm.h ───────────────────────────────────────────────────────────────────
-// Consensus ADMM — notation follows Module 19 slides exactly.
-//
-// ── Variables (slide 5 / slide 10) ───────────────────────────────────────────
-//
-//   u_i[j]    x_i  : this node's proposed duty for node j  ∈ [0,1]
-//                    the full primal vector (one entry per node)
-//   u_avg[j]  ū    : consensus average for node j's duty   (slide 5 z-update)
-//   lambda[j] λ_i  : dual variable vector, local to node i (slide 5 λ-update)
-//   k[j]      k_ij : coupling gain — how node j's LED illuminates this desk
-//   c[j]      c_i  : cost vector — nonzero only at j == LUMINAIRE (slide 9)
-//   d_bg      d_i  : background illuminance at this desk (lux)
-//   L         L_i  : illuminance lower bound from occupancy state
-//   n_sq      ‖kᵢ‖²           = Σⱼ k[j]²          (slide 14 denominator)
-//   m_sq      ‖kᵢ‖² − k_ii²   = n_sq − k[i]²       (slide 17/18 denominator)
-//
-// ── Slide 6 key result ────────────────────────────────────────────────────────
-//   Σᵢ λᵢ^(k) = 0  always  →  ū^(k+1) = (1/N)·Σᵢ xᵢ^(k+1)  (plain average)
-//   Consequence: no need to broadcast λ. Full xᵢ vector is broadcast.
-//
-// ── The three updates per iteration ──────────────────────────────────────────
-//   Step 1  x-update  (slide 10): compute zᵢ = ρ·ū − cᵢ − λᵢ,
-//                                 then solve min (1/2)ρu^Tu − u^Tzᵢ  s.t. u∈Cᵢ
-//           6 candidates (slides 12–18): unconstrained + 5 boundary points
-//   Step 2  broadcast full xᵢ to all peers via MSG_ADMM, collect their vectors
-//   Step 3  ū-update  (Eq. 4):   ū[j] = (1/N)·Σᵢ x_i[j]
-//           λ-update  (slide 5):  λᵢ += ρ·(xᵢ − ū)
-// ─────────────────────────────────────────────────────────────────────────────
 
 #include "Arduino.h"
 #include "can_comms.h"
@@ -49,8 +21,8 @@ extern float admm_L;                  // L_i : illuminance lower bound
 extern float admm_n_sq;               // ‖kᵢ‖²
 extern float admm_m_sq;               // ‖kᵢ‖² − k_ii²
 
-extern float admm_primal_res;         // primal residual ‖u_i − ū‖
-extern float admm_dual_res;           // dual residual ρ‖ū^k − ū^{k-1}‖
+extern float admm_primal_res; // primal residual ‖u_i − ū‖
+extern float admm_dual_res;   // dual residual ρ‖ū^k − ū^{k-1}‖
 
 extern float admm_recv[ADMM_N + 1][ADMM_N + 1]; // [src][component]
 extern int admm_recv_count[ADMM_N + 1];         // msgs received per node

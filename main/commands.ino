@@ -1,33 +1,11 @@
-// ─────────────────────────────────────────────────────────────────────────────
-// commands.ino  –  Serial command processor
-// Phase 2 changes vs your Phase 1 commnands.ino:
-//
-//  1. Signature: void commands(char *buffer, Print &out)
-//       • Called from serial_command()  →  out = Serial   (unchanged behaviour)
-//       • Called from hub_dispatch_msg() →  out = CanPrint (routes reply over CAN)
-//
-//  2. All Serial.print / Serial.printf / Serial.println
-//     → out.print / PRINTF(out,...) / out.println
-//     (PRINTF macro below handles printf-style formatting for any Print object)
-//
-//  3. Commands for another luminaire:
-//     Serial.println("err")  →  hub_forward_command(buffer, luminaire_index)
-//
-//  4. Table 3 commands added: O, U, C, g O, g U, g L, g C
-//
-//  5. 'o' command uses ref_high / ref_low (settable via O/U) instead of
-//     the old hardcoded OCC_REF[] array.
-//
-//  Everything else is identical to your Phase 1 code.
-// ─────────────────────────────────────────────────────────────────────────────
-
-// ── Phase 2 globals (defined in main.ino) ────────────────────────────────
-extern float ref_high;    // Table 3: HIGH occupancy lower bound [LUX]
-extern float ref_low;     // Table 3: LOW  occupancy lower bound [LUX]
-extern float energy_cost; // Table 3: energy cost coefficient
-extern float admm_primal_res; // admm.cpp
-extern float admm_dual_res;   // admm.cpp
+extern float ref_high;
+extern float ref_low;
+extern float energy_cost;
+extern float admm_primal_res;
+extern float admm_dual_res;
+extern volatile unsigned long ping_sent_us;
 void admm_request(bool is_responder);
+void process_can_messages();
 
 enum class CalStage : uint8_t;
 extern CalStage cal_stage;
@@ -57,7 +35,7 @@ void commands(char *buffer, Print &out)
     // ── Hub forwarding ──────────────────────────────────────────────────────
     // Parse the luminaire index from any command that has one
     // If it's not ours, forward the whole buffer over CAN and return
-    if (command != 'h' && command != 'c' && command != 'R')
+    if (command != 'h' && command != 'c' && command != 'R' && command != 'P')
     {
         int idx = -1;
         char *p = buffer + 1;
@@ -83,6 +61,32 @@ void commands(char *buffer, Print &out)
         delay(100); // let Core 1 put the broadcast restart frame on the CAN bus
         rp2040.reboot();
         break;
+
+    // ── P <dest> : RTT ping sweep to a peer node ──────────────────────────────
+    case 'P':
+    {
+        int dest_node = 0;
+        if (std::sscanf(buffer, "%c %d", &command, &dest_node) != 2 ||
+            dest_node < 1 || dest_node > N_NODES)
+        {
+            out.println("err: usage P <dest_node>");
+            break;
+        }
+
+        out.println("ack: ping sweep");
+        for (int i = 0; i < 500; i++)
+        {
+            ping_sent_us = micros();
+            can_send_sub((uint8_t)dest_node, MSG_CTRL, SUB_PING);
+
+            unsigned long wait_start_ms = millis();
+            while (millis() - wait_start_ms < 20)
+            {
+                process_can_messages();
+            }
+        }
+        break;
+    }
 
     // ── u <i> <val> : Set duty cycle (open-loop) ─────────────────────────────
     case 'u':
@@ -532,6 +536,7 @@ void commands(char *buffer, Print &out)
         out.println("          C <i> <val>  energy cost");
         out.println("ADMM:     automatic on o/C updates");
         out.println("System:   R  restart all nodes and recalibrate");
+        out.println("Ping:     P <dest>  500 RTT pings at 20 ms spacing");
         out.println("Get:      g y/u/r/v/o/a/f/d/p/t/E/V/F/O/U/L/C/K/J <i>");
         out.println("          (K=primal res, J=dual res)");
         out.println("          g b y/u <i>  (hub/local only)");

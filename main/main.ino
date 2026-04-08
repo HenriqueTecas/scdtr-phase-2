@@ -70,6 +70,7 @@ float r = 0.0f;
 float lux_value = 0.0f;
 float duty_cycle = 0.0f;
 float serial_duty_cycle = 0.0f;
+volatile unsigned long ping_sent_us = 0;
 
 int stream_y = 0, stream_u = 0;
 uint8_t can_stream_y_dest = 0, can_stream_u_dest = 0, can_stream_j_dest = 0;
@@ -824,6 +825,15 @@ void process_can_messages()
         case MSG_CTRL:
             if (sub == SUB_ACK)
                 Serial.println("ack:remote");
+            else if (sub == SUB_PING)
+            {
+                can_send_sub(src, MSG_CTRL, SUB_PONG);
+            }
+            else if (sub == SUB_PONG)
+            {
+                unsigned long rtt_us = micros() - ping_sent_us;
+                Serial.printf("rtt %d %lu\n", src, rtt_us);
+            }
             else if (sub == SUB_ADMM_TRIGGER)
             {
                 admm_request(true);

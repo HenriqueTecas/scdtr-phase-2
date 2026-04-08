@@ -1,13 +1,8 @@
-// ─── admm.cpp ─────────────────────────────────────────────────────────────────
-// Consensus ADMM implementation.
-// Every formula is derived directly from Module 19 slides.
-// See admm.h for variable naming convention.
-// ─────────────────────────────────────────────────────────────────────────────
 #include "admm.h"
-#include "calibration.h" // feedforward(), sys_background
+#include "calibration.h"
 #include "pid.h"
 
-void process_can_messages(); // defined in main.ino
+void process_can_messages();
 
 // ── Externals from main.ino ───────────────────────────────────────────────────
 extern float coupling_gains[4][4]; // [sensor][led], 1-indexed
@@ -105,22 +100,22 @@ void admm_init()
     admm_primal_res = 0;
     admm_dual_res = 0;
 
-    // k[j] = k_ij — coupling gain from node j's LED to THIS desk (slide 7).
+    // k[j] = k_ij — coupling gain from node j's LED to THIS desk.
     // Filled from the gain matrix measured during distributed calibration.
     for (int j = 1; j <= ADMM_N; j++)
         admm_k[j] = coupling_gains[LUMINAIRE][j];
 
-    // c_i[j] — cost vector (slide 9): c_i = [0 … c_i … 0]^T.
+    // c_i[j] — cost vector: c_i = [0 … c_i … 0]^T.
     // Only this node's own duty cycle has a cost; others are zero because
     // node i cannot control node j's LED.
     for (int j = 1; j <= ADMM_N; j++)
         admm_c[j] = (j == LUMINAIRE) ? energy_cost : 0.0f;
 
-    // λ_i = 0 at start — no constraint violation history yet (slide 5).
+    // λ_i = 0 at start — no constraint violation history yet.
     for (int j = 1; j <= ADMM_N; j++)
         admm_lambda[j] = 0.0f;
 
-    // d_i — background illuminance, measured during calibration (slide 7).
+    // d_i — background illuminance, measured during calibration.
     admm_d_bg = sys_background;
 
     // L_i — illuminance lower bound from occupancy state.
@@ -140,12 +135,12 @@ void admm_init()
         admm_L = constrain(L_raw, admm_d_bg, max_achievable);
     }
 
-    // n_sq = ‖k_i‖² = Σⱼ k_ij²  — denominator in the slide 14 solution.
+    // n_sq = ‖k_i‖² = Σⱼ k_ij²
     admm_n_sq = 0.0f;
     for (int j = 1; j <= ADMM_N; j++)
         admm_n_sq += admm_k[j] * admm_k[j];
 
-    // m_sq = ‖k_i‖² − k_ii²  — denominator in the slide 17/18 solutions.
+    // m_sq = ‖k_i‖² − k_ii²
     // It equals (A·A^T)^{-1} determinant when two constraints are active.
     admm_m_sq = admm_n_sq - admm_k[LUMINAIRE] * admm_k[LUMINAIRE];
 
@@ -158,22 +153,22 @@ void admm_init()
     float u_ff = feedforward(L_raw);
     for (int j = 1; j <= ADMM_N; j++)
         admm_lambda[j] = 0.0f;
-    admm_u[LUMINAIRE]     = u_ff;
+    admm_u[LUMINAIRE] = u_ff;
     admm_u_avg[LUMINAIRE] = u_ff;
     for (int j = 1; j <= ADMM_N; j++)
     {
         if (j != LUMINAIRE)
         {
-            admm_u[j]     = 0.5f;
+            admm_u[j] = 0.5f;
             admm_u_avg[j] = 0.5f;
         }
     }
 
     // Seed receive windows: own row uses u_ff; peer rows use 0.5 so a timeout
     // falls back to a neutral estimate rather than zero.
-    admm_seed_window(admm_recv,      admm_recv_seen,      admm_recv_count,      0.5f);
+    admm_seed_window(admm_recv, admm_recv_seen, admm_recv_count, 0.5f);
     admm_seed_window(admm_recv_next, admm_recv_next_seen, admm_recv_next_count, 0.5f);
-    admm_recv[LUMINAIRE][LUMINAIRE]      = u_ff;
+    admm_recv[LUMINAIRE][LUMINAIRE] = u_ff;
     admm_recv_next[LUMINAIRE][LUMINAIRE] = u_ff;
 
     Serial.printf("[ADMM INIT] occ=%d L_raw=%.2f L=%.2f d_bg=%.2f u_ff=%.4f\n",
@@ -183,7 +178,7 @@ void admm_init()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Feasibility check — slide 8 constraint set Cᵢ
+// Feasibility check — constraint set Cᵢ
 //
 //   C1: k_i^T · u ≥ L_i − d_i   (illuminance lower bound at this desk)
 //   C2: u[LUMINAIRE] ≥ 0         (LED duty cannot be negative)
@@ -213,7 +208,7 @@ static float predicted_lux(const float u[])
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// QP objective — slide 10 simplified form
+// QP objective — simplified form
 //
 //   g(u) = (1/2)ρ·u^T·u − u^T·z_i
 //
