@@ -18,8 +18,6 @@ public:
         // Each node has a different static gain k_ii (measured during distributed
         // calibration) so their open-loop gains differ. The PI gains are tuned
         // individually in Part 1 — load the correct set here.
-        //
-        // TODO: replace placeholder values with your actual Part 1 results.
         // The switch uses LUMINAIRE index (1/2/3) set during boot from UID_TABLE.
         // If a new board is added, add a case here and to UID_TABLE in main.ino.
         switch (LUMINAIRE)

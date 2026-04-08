@@ -35,9 +35,9 @@ int LUMINAIRE = 0; // 1/2/3 — this IS the CAN src/dest address
 
 // ─── CAN globals ──────────────────────────────────────────────────────────────
 MCP2515 can0(spi0, 17, 19, 16, 18, 10000000);
-queue_t can_rx_queue;
-queue_t can_tx_queue;
-queue_t core1_ready_queue;
+queue_t can_rx_queue;// Core 1 → Core 0: received CAN frames
+queue_t can_tx_queue; // Core 0 → Core 1: frames to transmit
+queue_t core1_ready_queue; // Core 0 → Core 1: one-shot boot synchronisation
 
 const uint8_t CAN_INT_PIN = 20;
 volatile bool can_got_irq = false;
